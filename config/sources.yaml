@@ -1,0 +1,216 @@
+# Data sources and pipeline configuration for the Delaware basin (HUC-4 0204)
+# seamless 1/9 arc-second topobathy DEM.
+#
+# All vertical datums are NAVD88 meters unless noted. All endpoints verified
+# live in Aug 2026.
+
+project:
+  name: dewatershed19
+  version: 2026v1
+  huc4: "0204"
+  # HUC-6 subsets, for reference: 020401 (Upper Delaware), 020402 (Lower
+  # Delaware), 020403 (NJ Atlantic coastal). Domain = all of 0204.
+  boundary_buffer_m: 2000
+  # Coarse pre-filter ONLY, for the TNM API fallback when the basin polygon
+  # will not fit in a request URL (03_discover_tiles.py). This is not the
+  # domain -- do not shrink it to restrict the run; use clip_bbox instead.
+  # NB: HUC-4 0204 is "Delaware-Mid Atlantic Coastal" and reaches 36.8N (the
+  # whole Delmarva), so this box is deliberately wider than the old 38.4 edge.
+  bbox: [-76.4, 36.7, -73.9, 42.5]
+  # Development clip [W, S, E, N]: restrict the domain to a sub-region.
+  # null = the full HUC-4. Stage 01 intersects the basin with this box, and
+  # everything downstream (CUDEM selection, the output tile list, and all
+  # source discovery) derives from that boundary -- so this one knob narrows
+  # the entire pipeline. Set back to null for the production run.
+  # Tidal Delaware: head of tide at Trenton down to the bay mouth. Chosen to
+  # sit inside the chesapeak_delaware VDatum region (see vdatum.sample_bounds)
+  # -- pushing the east edge past ~-74.9 reaches the NJ Atlantic shore, which
+  # needs a second region and would leave the separation raster undefined.
+  clip_bbox: [-75.60, 38.80, -74.95, 40.10]   # tidal Delaware test region
+
+target_grid:
+  epsg: 4269                  # NAD83 geographic; audit (stage 02) must confirm
+  vertical: "NAVD88 (m)"
+  cells_per_degree: 32400     # 1/9 arc-second
+  tile_size_deg: 0.25
+  nodata: -999999.0
+  # collar_px / registration are derived empirically by 02_audit_cudem_grid.py
+  # and written to config/tile_grid.json. Do not set them here.
+
+tnm_api:
+  base: "https://tnmaccess.nationalmap.gov/api/v1"
+  page_size: 200
+
+wbd:
+  url: "https://prd-tnm.s3.amazonaws.com/StagedProducts/Hydrography/WBD/HU2/GPKG/WBD_02_HU2_GPKG.zip"
+
+nhdplushr:
+  # Staged NHDPlus HR GDB for HUC-4 0204 (water-mask polygons).
+  url: "https://prd-tnm.s3.amazonaws.com/StagedProducts/Hydrography/NHDPlusHR/Beta/GDB/NHDPLUS_H_0204_HU4_GDB.zip"
+  # Feature classes / FTypes used for the water mask:
+  nhdarea_ftypes: [460, 445, 336]      # StreamRiver, SeaOcean, CanalDitch
+  nhdwaterbody_ftypes: [390, 436, 493] # LakePond, Reservoir, Estuary
+  min_waterbody_m2: 10000              # 1 ha floor for lakes/ponds
+
+sources:
+  # ---- land stack (first valid wins, top to bottom) ----
+  s1m:
+    role: land
+    priority: 1
+    tnm_dataset: "Seamless 1-m DEM (S1M)"
+    dir: data/raw/s1m
+    crs_note: "NAD83(2011) UTM 18N expected basin-wide"
+    resampling: average
+  dem1m_projects:
+    role: land
+    priority: 2
+    tnm_dataset: "Digital Elevation Model (DEM) 1 meter"
+    dir: data/raw/dem1m_projects
+    resampling: average
+  dem13:
+    role: land
+    priority: 3
+    # 1/3 arc-second seamless; 1-degree tiles, direct S3 pattern.
+    url_pattern: "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/{tile}/USGS_13_{tile}.tif"
+    dir: data/raw/dem13
+    resampling: bilinear
+
+  # ---- water stack (first valid wins, top to bottom) ----
+  ehydro:
+    role: water
+    priority: 1
+    feature_server: "https://services7.arcgis.com/n1YM8pTrFmm7L4hs/arcgis/rest/services/eHydro_Survey_Data/FeatureServer/0/query"
+    district: CENAP
+    dir: data/raw/ehydro
+    grid_dir: data/intermediate/ehydro_grids
+    grid_res_m: 3.0
+    # CENAP soundings: depth in feet, positive down, referenced to MLLW.
+    # Overridable per survey in manifests/ehydro_overrides.yaml if the audit
+    # flags an exception.
+    depth_units: feet
+    depth_positive_down: true
+    vertical_ref: MLLW
+    resampling: bilinear
+  eaarlb:
+    role: water
+    priority: 2
+    doi: "10.5066/P97031JU"
+    # ScienceBase's ?filter=doi=... is SILENTLY IGNORED -- it returns the whole
+    # 19M-item catalog rather than an error, which made discovery walk 20
+    # arbitrary items and find nothing. The item id is resolved through the
+    # doi.org redirect instead; this pin skips that and is the fallback if
+    # resolution ever breaks. Verified 2026-08-27: 23 zips + xml, 0.65 GB,
+    # including topobathy_voids.zip (the lidar-void polygons).
+    sciencebase_item: "5f43b4cf82ce4c3d1222d2a5"
+    dir: data/raw/eaarlb
+    resampling: average
+  cudem19:
+    role: water
+    priority: 3
+    s3_prefixes:
+      - "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NCEI_ninth_Topobathy_2014_8483/northeast_sandy/"
+      - "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NCEI_ninth_Topobathy_2014_8483/chesapeake_bay/"
+    bulk_index: "https://coast.noaa.gov/htdata/raster2/elevation/NCEI_ninth_Topobathy_2014_8483/"
+    urllist: "https://coast.noaa.gov/htdata/raster2/elevation/NCEI_ninth_Topobathy_2014_8483/urllist8483.txt"
+    tileindex_zip: "https://coast.noaa.gov/htdata/raster2/elevation/NCEI_ninth_Topobathy_2014_8483/tileindex_NCEI_ninth_Topobathy_2014.zip"
+    dir: data/raw/cudem19
+    resampling: near   # already on the target grid
+  coned:
+    role: water
+    priority: 4
+    enabled: false     # 95 GB; enable only if QA finds water-coverage gaps
+    bulk_index: "https://coast.noaa.gov/htdata/raster2/elevation/NewJersey_Delaware_Coned_Topobathy_DEM_2015_5040/"
+    urllist: "https://coast.noaa.gov/htdata/raster2/elevation/NewJersey_Delaware_Coned_Topobathy_DEM_2015_5040/urllist5040.txt"
+    dir: data/raw/coned
+    resampling: average
+
+vdatum:
+  # MLLW -> NAVD88 separation, sampled from the VDatum transformation service.
+  #
+  # Do NOT go back to composing the raw tss/mllw .gtx grids by hand: measured
+  # against this service at 11 CO-OPS gauges, `mllw` alone is off by up to
+  # 0.18 m and `tss + mllw` by up to 0.70 m, both with a systematic
+  # along-estuary trend. The service reproduces the gauges to 0.026 m median /
+  # 0.082 m max -- inside its own published uncertainty -- so it is the
+  # authority, not our arithmetic.
+  service_url: "https://vdatum.noaa.gov/vdatumweb/api/convert"
+  region: chesapeak_delaware
+  # This region REJECTS NAD83_2011 as the source frame for tidal datums
+  # ("Source Horizontal Frame should be IGS14 for Tidal"), matching horz=IGS14
+  # in the grid distribution's .met file.
+  source_h_frame: IGS14
+  target_h_frame: NAD83_2011
+  geoid: geoid18
+  # Sampling grid [W, S, E, N] -- the DEdelbay coverage, rounded outward.
+  # For the full HUC-4 the Atlantic coast needs a second region/pass.
+  sample_bounds: [-75.64, 38.74, -74.69, 40.26]
+  sample_spacing_deg: 0.05    # ~5 km; the separation field is smooth (-0.85
+                              # to -1.26 m over the whole estuary)
+  sep_res_deg: 0.005          # ~500 m output raster
+  sample_cache: manifests/vdatum_samples.csv
+  service_workers: 4          # be polite to NOAA
+  # Raster value = elevation of MLLW surface relative to NAVD88 (m), i.e.
+  # mllw_minus_navd88 (negative in this estuary); z_navd88 = z_mllw + value.
+  sep_raster: data/intermediate/mllw_sep/sep_mllw_minus_navd88.tif
+  # NOAA CO-OPS stations used to sign/magnitude-verify the separation raster
+  # via the published datums API (expect NAVD88-MLLW ~ 0.5-0.9 m here).
+  # Every CO-OPS gauge inside the DEdelbay grid that publishes both MLLW and
+  # NAVD88, mouth to head of tide. Three stations (Lewes/Reedy Point/
+  # Philadelphia) could not tell a single outlier apart from a systematic
+  # along-estuary trend -- with 11 it is unmistakable, and this gate is the
+  # one protecting the pipeline's primary failure mode. Verified 2026-08-27.
+  benchmark_stations:
+    - "8557380"   # Lewes                    38.783
+    - "8536110"   # Cape May                 38.968
+    - "8535055"   # Bivalve, Maurice River   39.233
+    - "8536931"   # Fortescue Creek          39.238
+    - "8551910"   # Reedy Point              39.558
+    - "8540433"   # Marcus Hook              39.812
+    - "8545240"   # Philadelphia             39.933
+    - "8545530"   # Philadelphia Pier 11     39.953
+    - "8538875"   # Pompeston Creek          40.013
+    - "8539487"   # Fieldsboro               40.137
+    - "8539993"   # Trenton Marine Terminal  40.188
+  datums_api: "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/{station}/datums.json"
+  station_api: "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/{station}.json"
+  # 0.10 m, set against the reference's accuracy rather than by preference:
+  # VDatum's own product misses these gauges by up to 0.082 m and publishes
+  # +/-0.09 m uncertainty here, so no correct implementation can hit 0.05 m.
+  # The gate keeps its teeth -- every error found on 2026-08-27 (0.18, 0.30,
+  # 0.42, 0.59 m) is still caught several times over.
+  max_benchmark_residual_m: 0.10
+
+compositing:
+  feather_px: 15          # land/water EDT feather width (~45 m at 1/9")
+  survey_feather_px: 8    # feather at eHydro/EAARL footprint edges within water
+  fill_max_px: 50         # max search radius for residual nodata fill
+  source_ids:             # per-pixel provenance raster values
+    nodata: 0
+    s1m: 1
+    dem1m_projects: 2
+    dem13: 3
+    ehydro: 11
+    eaarlb: 12
+    cudem19: 13
+    coned: 14
+    filled: 99
+
+output:
+  tile_dir: data/final/tiles
+  vrt: data/final/dewatershed19_2026v1.vrt
+  cog:
+    compress: DEFLATE
+    predictor: 3
+    blocksize: 512
+    overview_resampling: AVERAGE
+
+download:
+  workers: 8
+  retries: 5
+  timeout_s: 120
+
+qa:
+  dir: data/final/qa
+  quicklook_dir: data/final/quicklooks
+  land_overlap_median_max_m: 0.10
+  seam_gradient_flag_m: 5.0

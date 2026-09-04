@@ -1,0 +1,24 @@
+name: de-dem
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - gdal>=3.8
+  - libgdal-core
+  - rasterio
+  - rioxarray
+  - geopandas
+  - shapely>=2
+  - pyproj
+  - xarray
+  - scipy
+  - requests
+  - tqdm
+  - pyyaml
+  - matplotlib-base
+  - fiona
+  - pyogrio
+  - pytest
+  - pip
+  - pip:
+      - -e .

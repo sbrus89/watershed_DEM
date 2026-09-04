@@ -1,0 +1,7 @@
+data/
+manifests/cache/
+manifests/*.done
+*.egg-info/
+__pycache__/
+*.pyc
+.DS_Store

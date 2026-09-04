@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dem_pipeline"
+version = "0.1.0"
+description = "Delaware basin (HUC 0204) seamless 1/9 arc-second topobathy DEM pipeline"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = ["dem_pipeline"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
