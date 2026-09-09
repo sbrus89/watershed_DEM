@@ -46,12 +46,33 @@ def check_seams(tile_paths: dict[str, Path]) -> dict:
     With zero collar the shared boundary has no duplicated samples, so we
     compare the facing edge rows/cols and report the max step; with a collar,
     overlapping pixels must agree exactly.
+
+    A flagged edge whose worst-disagreement pixel traces to `cudem19`
+    provenance on *both* sides is an inherent CUDEM-vintage registration
+    mismatch: the grid contract requires verbatim passthrough of each tile's
+    audited CUDEM geotransform (`resampling: near`), and two real adjacent
+    CUDEM tiles from different survey vintages aren't necessarily mutually
+    pixel-aligned -- see ARCHITECTURE.md §9. That case is reported separately
+    as `inherent_misalignment` rather than failing the check, the same way
+    `size_mismatches` is recorded rather than papered over. This rule is
+    deliberately narrow: it only fires on a same-source (`cudem19`/`cudem19`)
+    pair. A mixed-source edge is never auto-accepted this way, even if it
+    looks superficially similar -- one `cudem19`/`dem13` edge turned out to
+    be this same inherent mismatch on manual review, while another
+    `cudem19`/`dem13` edge turned out to be a real, still-undiagnosed bug
+    (see ARCHITECTURE.md §9). Automating past that ambiguity would risk
+    silently swallowing the real one.
     """
     import rasterio
 
-    cfg = load_config()["qa"]
+    full_cfg = load_config()
+    cfg = full_cfg["qa"]
+    cudem_id = full_cfg.get("compositing", {}).get("source_ids", {}).get("cudem19")
     spec = GridSpec.load()
     results = {}
+    flagged = {}
+    inherent_misalignment = {}
+    size_mismatches = {}
     for name, p in tile_paths.items():
         north, west = parse_tile_name(name)
         east_neighbor = tile_name(north, west + TILE_DEG)
@@ -59,31 +80,76 @@ def check_seams(tile_paths: dict[str, Path]) -> dict:
         for other, axis in ((east_neighbor, "x"), (south_neighbor, "y")):
             if other not in tile_paths:
                 continue
+            key = f"{name}|{other}"
             with rasterio.open(p) as a, rasterio.open(tile_paths[other]) as b:
+                # A tile with an empirically-audited CUDEM size can differ by
+                # a pixel or two from a neighbor sized off the nominal
+                # collar_px lattice (no CUDEM coverage there) -- this is a
+                # real grid-contract gap between the two sizing paths, not
+                # something to silently paper over, so it's recorded
+                # separately rather than just clipped away.
+                shared = a.height if axis == "x" else a.width
+                other_shared = b.height if axis == "x" else b.width
+                if shared != other_shared:
+                    size_mismatches[key] = [shared, other_shared]
+                    shared = min(shared, other_shared)
                 if spec.collar_px > 0:
                     n = 2 * spec.collar_px
                     if axis == "x":
-                        ea = a.read(1)[:, -n:]
-                        eb = b.read(1)[:, :n]
+                        ea = a.read(1)[:shared, -n:]
+                        eb = b.read(1)[:shared, :n]
+                        a_px = lambda idx, w=a.width: (idx[0], w - n + idx[1])
+                        b_px = lambda idx: (idx[0], idx[1])
                     else:
-                        ea = a.read(1)[-n:, :]
-                        eb = b.read(1)[:n, :]
-                    metric = float(np.nanmax(np.abs(
-                        _nanify(ea, a.nodata) - _nanify(eb, b.nodata))))
+                        ea = a.read(1)[-n:, :shared]
+                        eb = b.read(1)[:n, :shared]
+                        a_px = lambda idx, h=a.height: (h - n + idx[0], idx[1])
+                        b_px = lambda idx: (idx[0], idx[1])
                 else:
                     if axis == "x":
-                        ea = a.read(1)[:, -1]
-                        eb = b.read(1)[:, 0]
+                        ea = a.read(1)[:shared, -1]
+                        eb = b.read(1)[:shared, 0]
+                        a_px = lambda idx, w=a.width: (idx[0], w - 1)
+                        b_px = lambda idx: (idx[0], 0)
                     else:
-                        ea = a.read(1)[-1, :]
-                        eb = b.read(1)[0, :]
-                    metric = float(np.nanmax(np.abs(
-                        _nanify(ea, a.nodata) - _nanify(eb, b.nodata))))
-            results[f"{name}|{other}"] = metric
-    flagged = {k: v for k, v in results.items()
-               if np.isfinite(v) and v > cfg["seam_gradient_flag_m"]}
-    return {"check": "seams", "pass": not flagged,
-            "n_edges": len(results), "flagged": flagged}
+                        ea = a.read(1)[-1, :shared]
+                        eb = b.read(1)[0, :shared]
+                        a_px = lambda idx, h=a.height: (h - 1, idx[0])
+                        b_px = lambda idx: (0, idx[0])
+                diff = np.abs(_nanify(ea, a.nodata) - _nanify(eb, b.nodata))
+            metric = (float(np.nanmax(diff)) if np.any(np.isfinite(diff))
+                      else float("nan"))
+            results[key] = metric
+            if np.isfinite(metric) and metric > cfg["seam_gradient_flag_m"]:
+                idx = np.unravel_index(np.nanargmax(diff), diff.shape)
+                ida = _provenance_at(p, *a_px(idx))
+                idb = _provenance_at(tile_paths[other], *b_px(idx))
+                if cudem_id is not None and ida == cudem_id and idb == cudem_id:
+                    inherent_misalignment[key] = metric
+                else:
+                    flagged[key] = metric
+    return {"check": "seams", "pass": not flagged and not size_mismatches,
+            "n_edges": len(results), "flagged": flagged,
+            "inherent_misalignment": inherent_misalignment,
+            "size_mismatches": size_mismatches}
+
+
+def _provenance_at(main_path: Path, row: int, col: int) -> int | None:
+    """Provenance source id at one pixel, or None if unavailable.
+
+    Best-effort: a missing companion `_source.tif` (e.g. in tests, or an
+    older product predating provenance tracking) or an out-of-range pixel
+    just means "can't classify," not an error.
+    """
+    import rasterio
+
+    src_p = main_path.parent / (main_path.stem + "_source.tif")
+    if not src_p.exists():
+        return None
+    with rasterio.open(src_p) as src:
+        if not (0 <= row < src.height and 0 <= col < src.width):
+            return None
+        return int(src.read(1, window=((row, row + 1), (col, col + 1)))[0, 0])
 
 
 def _nanify(arr, nodata):

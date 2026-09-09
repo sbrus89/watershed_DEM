@@ -147,6 +147,56 @@ def test_seams_collar_branch(tmp_path, monkeypatch):
     assert not res["pass"] and len(res["flagged"]) == 1
 
 
+def test_seams_inherent_cudem_misalignment_not_flagged(tmp_path, monkeypatch):
+    """A cliff whose worst pixel is cudem19 on both sides is the known,
+    accepted CUDEM-vintage registration mismatch -- reported separately, and
+    must not fail the check."""
+    from rasterio.transform import Affine
+
+    qa, paths, terrain = _sandbox(tmp_path, monkeypatch)
+
+    gt = TILES["n40x00_w075x00"]
+    arr = terrain(gt) + 50.0
+    make_geotiff(tmp_path / "tiles" / "n40x00_w075x00.tif", arr,
+                 Affine.from_gdal(*gt), "EPSG:4269", nodata=NODATA)
+    for name in ("n40x00_w075x25", "n40x00_w075x00"):
+        ids = np.full((90, 90), 13, dtype="f4")  # cudem19 on both sides
+        make_geotiff(tmp_path / "tiles" / f"{name}_source.tif", ids,
+                     Affine.from_gdal(*TILES[name]), "EPSG:4269")
+
+    res = qa.check_seams(paths)
+    assert res["pass"]
+    assert res["flagged"] == {}
+    assert "n40x00_w075x25|n40x00_w075x00" in res["inherent_misalignment"]
+
+
+def test_seams_mixed_source_cliff_still_flagged(tmp_path, monkeypatch):
+    """Same-magnitude cliff, but the two sides trace to different sources --
+    must never be auto-accepted as inherent misalignment, since a
+    cudem19/dem13 pairing has also turned out to be a real, undiagnosed bug
+    elsewhere in this basin. Only a same-source (cudem19/cudem19) pair is
+    trusted enough to auto-classify."""
+    from rasterio.transform import Affine
+
+    qa, paths, terrain = _sandbox(tmp_path, monkeypatch)
+
+    gt = TILES["n40x00_w075x00"]
+    arr = terrain(gt) + 50.0
+    make_geotiff(tmp_path / "tiles" / "n40x00_w075x00.tif", arr,
+                 Affine.from_gdal(*gt), "EPSG:4269", nodata=NODATA)
+    make_geotiff(tmp_path / "tiles" / "n40x00_w075x25_source.tif",
+                 np.full((90, 90), 13, dtype="f4"),  # cudem19
+                 Affine.from_gdal(*TILES["n40x00_w075x25"]), "EPSG:4269")
+    make_geotiff(tmp_path / "tiles" / "n40x00_w075x00_source.tif",
+                 np.full((90, 90), 1, dtype="f4"),  # s1m
+                 Affine.from_gdal(*TILES["n40x00_w075x00"]), "EPSG:4269")
+
+    res = qa.check_seams(paths)
+    assert not res["pass"]
+    assert "n40x00_w075x25|n40x00_w075x00" in res["flagged"]
+    assert res["inherent_misalignment"] == {}
+
+
 def test_cudem_land_overlap_bias_detection(tmp_path, monkeypatch):
     from rasterio.transform import Affine
 

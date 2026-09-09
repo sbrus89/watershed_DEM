@@ -107,6 +107,24 @@ class GridSpec:
         n = TILE_PX + 2 * self.collar_px
         return (origin_x, px, 0.0, origin_y, 0.0, -px), n, n
 
+    def tile_matches(self, name: str, path) -> bool:
+        """True if the raster at ``path`` has this tile's exact geotransform
+        and size.
+
+        A stage that resumes by skipping an existing output must call this
+        before trusting the file: an on-disk tile composed under an older
+        GridSpec (e.g. before stage 02's audit was rerun with more CUDEM
+        coverage) silently keeps a stale, sub-pixel-wrong geotransform
+        otherwise -- the exact failure mode this pipeline's grid-conformity
+        contract exists to catch.
+        """
+        import rasterio
+
+        gt, w, h = self.tile_geotransform(name)
+        with rasterio.open(path) as src:
+            return (src.width == w and src.height == h
+                    and src.transform.to_gdal() == gt)
+
     def tile_bounds(self, name: str) -> tuple[float, float, float, float]:
         """(west, south, east, north) actual raster bounds incl. collar."""
         gt, w, h = self.tile_geotransform(name)

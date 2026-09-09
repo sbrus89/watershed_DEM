@@ -29,6 +29,37 @@ WATER_SOURCES = ["ehydro", "eaarlb", "cudem19", "coned"]
 
 _RESAMPLING = {"near": "nearest", "average": "average", "bilinear": "bilinear"}
 
+# Plausibility window for LAND elevations (m NAVD88), basin-wide: below sea
+# level tidal marsh/subsidence up past the actual highest terrain in the
+# basin -- confirmed against raw S1M pixels under Slide Mountain (the
+# Catskills' and this basin's high point, 1274 m) reading a smooth ~1275 m
+# summit, with margin above that. An earlier 1000 m ceiling was clipping
+# that real high-Catskills terrain as "implausible" and replacing over a
+# million real elevation pixels per affected tile with interpolated filler
+# -- a correctness bug, not just a seam artifact (2026-09-08). Unlike
+# eHydro's window (scripts/06), this never aborts a run -- some real-world
+# S1M distribution tiles carry a minority of corrupt edge pixels that are
+# literal fractional blends of the nodata sentinel with real data (e.g. a
+# raw pixel of -529999.5 in a tile whose nodata is -999999.0 is
+# -999999.0 * 0.53 -- not a unit/datum bug, a bad tile). Masking just those
+# per-pixel outliers lets first_valid() fall through to the next-priority
+# land source instead of losing (or corrupting) the whole tile over a
+# handful of bad edge pixels.
+LAND_PLAUSIBLE_MIN, LAND_PLAUSIBLE_MAX = -15.0, 1500.0
+
+# Some land products (confirmed for both `s1m` and `dem13`, 2026-09-09) fill
+# known-open-water areas with a flat 0 m plate instead of proper nodata,
+# rather than leaving a hole. Combined with NHDPlus HR (the water mask's only
+# source, scripts/07_build_water_mask.py) having zero coverage over the open
+# Atlantic, that plate silently read as valid land elevation basin-wide: 3
+# whole output tiles on the continental shelf south of Cape May came out
+# ~100% flat 0.0 "land" with real CUDEM bathymetry (down to -23 m) sitting
+# unused in the water stack at the same pixels (230M px / 2.7% of the basin
+# in total). Real lidar/DEM elevations essentially never land on a bit-exact
+# 0.0, so it's a safe tell -- see the water_mask construction in
+# compose_tile. See ARCHITECTURE.md §9.
+LAND_VOID_FILL_VALUE = 0.0
+
 
 def source_vrt(name: str) -> Path | None:
     """Path to a source's VRT, or None if the source has no data yet."""
@@ -186,12 +217,34 @@ def compose_tile(name: str, out_dir: Path | None = None) -> Path:
     out_tif = out_dir / f"{name}.tif"
     src_tif = out_dir / f"{name}_source.tif"
     if out_tif.exists() and src_tif.exists():
-        log.info("%s: already composed", name)
-        return out_tif
+        if spec.tile_matches(name, out_tif):
+            log.info("%s: already composed", name)
+            return out_tif
+        log.warning("%s: existing product's grid doesn't match the current "
+                    "GridSpec (stale from a run under an older config) -- "
+                    "recomposing", name)
 
     gt, width, height = spec.tile_geotransform(name)
-    bounds = spec.tile_bounds(name)
-    shape = (height, width)
+
+    # feather_alpha's EDT and fillnodata's IDW both only "see" the array
+    # they're handed. Computed at exactly the output tile's own bounds, a
+    # feather/fill zone that straddles a tile boundary sees a different
+    # neighborhood on each side (this tile's edge vs. nothing) and the two
+    # neighboring tiles disagree at the seam -- not from any real elevation
+    # difference, purely from each tile's independent computation not seeing
+    # past its own edge. Padding the WORKING window by enough pixels to
+    # cover every EDT/fill radius used below, then cropping back to the
+    # exact output grid before writing, gives both tiles the same true
+    # geographic neighborhood in their shared boundary zone so they converge
+    # on the same answer. The written geotransform/size are unaffected.
+    pad_px = max(comp["feather_px"], comp["survey_feather_px"],
+                comp["fill_max_px"])
+    pad_gt = (gt[0] - pad_px * gt[1], gt[1], 0.0,
+              gt[3] - pad_px * gt[5], 0.0, gt[5])
+    pad_width, pad_height = width + 2 * pad_px, height + 2 * pad_px
+    pad_shape = (pad_height, pad_width)
+    pad_bounds = (pad_gt[0], pad_gt[3] + pad_height * pad_gt[5],
+                 pad_gt[0] + pad_width * pad_gt[1], pad_gt[3])
 
     def warp_stack(source_names: list[str]) -> dict[str, np.ndarray]:
         arrays = {}
@@ -202,8 +255,19 @@ def compose_tile(name: str, out_dir: Path | None = None) -> Path:
             vrt = source_vrt(s)
             if vrt is None:
                 continue
-            arr = warp_to_tile(vrt, gt, width, height, dst_crs,
+            arr = warp_to_tile(vrt, pad_gt, pad_width, pad_height, dst_crs,
                                scfg["resampling"], nodata)
+            if s in LAND_SOURCES:
+                bad = np.isfinite(arr) & (
+                    (arr < LAND_PLAUSIBLE_MIN) | (arr > LAND_PLAUSIBLE_MAX))
+                if bad.any():
+                    log.warning(
+                        "%s: %s: masking %d implausible land px (range "
+                        "[%.1f, %.1f] outside [%g, %g])",
+                        name, s, int(bad.sum()),
+                        float(np.min(arr[bad])), float(np.max(arr[bad])),
+                        LAND_PLAUSIBLE_MIN, LAND_PLAUSIBLE_MAX)
+                    arr[bad] = np.nan
             if np.isfinite(arr).any():
                 arrays[s] = arr
         return arrays
@@ -214,26 +278,30 @@ def compose_tile(name: str, out_dir: Path | None = None) -> Path:
         raise RuntimeError(f"{name}: no source data intersects this tile")
 
     land, land_ids = (first_valid(land_arrays, id_map) if land_arrays
-                      else (np.full(shape, np.nan, "f4"), np.zeros(shape, "u1")))
+                      else (np.full(pad_shape, np.nan, "f4"), np.zeros(pad_shape, "u1")))
     # Water sources are feathered into each other at survey footprint edges
     # (eHydro/EAARL-B channels must not step against the older CUDEM grid).
     water, water_ids = (
         feathered_first_valid(water_arrays, id_map, comp["survey_feather_px"])
         if water_arrays
-        else (np.full(shape, np.nan, "f4"), np.zeros(shape, "u1")))
+        else (np.full(pad_shape, np.nan, "f4"), np.zeros(pad_shape, "u1")))
 
     # --- water mask: NHD polygons U survey footprints (minus EAARL voids)
-    #     U (S1M nodata where CUDEM has data) ---
+    #     U (missing or untrustworthy land data where a water source has
+    #     real data) ---
     mask_gpkg = repo_path("data", "intermediate", "water_mask", "water_mask.gpkg")
-    water_mask = _rasterize(_read_mask_geoms(mask_gpkg, "water", bounds), gt, shape)
+    water_mask = _rasterize(_read_mask_geoms(mask_gpkg, "water", pad_bounds), pad_gt, pad_shape)
     for layer in ("ehydro_footprint", "eaarlb_footprint"):
-        water_mask |= _rasterize(_read_mask_geoms(mask_gpkg, layer, bounds), gt, shape)
-    void = _rasterize(_read_mask_geoms(mask_gpkg, "eaarlb_voids", bounds), gt, shape)
+        water_mask |= _rasterize(_read_mask_geoms(mask_gpkg, layer, pad_bounds), pad_gt, pad_shape)
+    void = _rasterize(_read_mask_geoms(mask_gpkg, "eaarlb_voids", pad_bounds), pad_gt, pad_shape)
     water_mask &= ~void
-    if "s1m" in land_arrays and "cudem19" in water_arrays:
-        water_mask |= np.isnan(land_arrays["s1m"]) & np.isfinite(
-            water_arrays["cudem19"]
-        )
+    # NHDPlus HR has no coverage over the open Atlantic. Two more signals
+    # close that gap: no land source has any elevation here at all, or the
+    # land composite is the LAND_VOID_FILL_VALUE plate (see its definition
+    # above). Both are harmless to OR in unconditionally -- the trailing
+    # `& isfinite(water)` below already drops them back out wherever no
+    # water source actually has data either.
+    water_mask |= np.isnan(land) | (land == LAND_VOID_FILL_VALUE)
     # Water sources only count where they actually have data.
     water_mask &= np.isfinite(water)
 
@@ -263,6 +331,10 @@ def compose_tile(name: str, out_dir: Path | None = None) -> Path:
         newly = holes & (filled != nodata)
         z[newly] = filled[newly]
         source_id[newly] = id_map["filled"]
+
+    # crop the padded working window back to the exact output grid
+    z = z[pad_px:pad_px + height, pad_px:pad_px + width]
+    source_id = source_id[pad_px:pad_px + height, pad_px:pad_px + width]
 
     # --- write ---
     transform = Affine.from_gdal(*gt)

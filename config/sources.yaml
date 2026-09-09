@@ -26,7 +26,7 @@ project:
   # sit inside the chesapeak_delaware VDatum region (see vdatum.sample_bounds)
   # -- pushing the east edge past ~-74.9 reaches the NJ Atlantic shore, which
   # needs a second region and would leave the separation raster undefined.
-  clip_bbox: [-75.60, 38.80, -74.95, 40.10]   # tidal Delaware test region
+  clip_bbox: null   # full HUC-4 0204 production run
 
 target_grid:
   epsg: 4269                  # NAD83 geographic; audit (stage 02) must confirm

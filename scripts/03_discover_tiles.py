@@ -66,17 +66,42 @@ def footprint_union(rows):
 
 
 def dem13_rows(gap_geom, cfg) -> list[dict]:
-    """1-degree 1/3-arc-second tiles covering any residual gap polygons."""
+    """1-degree 1/3-arc-second tiles covering any residual gap polygons.
+
+    dem13 is the last-resort land fallback (priority 3, below S1M and the
+    project 1-m DEMs): a residual gap is just as likely to be open water
+    (no 1/3" land tile exists there at all) as it is a real coverage hole,
+    so a 404 here is an expected outcome, not a download failure. Candidates
+    are restricted to cells that actually intersect the gap polygon (not
+    just its bounding box) and confirmed to exist via HEAD before being
+    queued, so stage 04 never has to fail a whole run over a cell that was
+    never going to have data.
+    """
     import math
+
+    import requests
+    from shapely.geometry import box
 
     dest = dp.path(cfg["sources"]["dem13"]["dir"])
     pattern = cfg["sources"]["dem13"]["url_pattern"]
+    timeout = cfg["download"]["timeout_s"]
     w, s, e, n = gap_geom.bounds
     rows = []
     for lat in range(math.floor(s), math.ceil(n)):
         for lon in range(math.floor(w), math.ceil(e)):
+            if not gap_geom.intersects(box(lon, lat, lon + 1, lat + 1)):
+                continue
             tile = f"n{lat + 1:02d}w{abs(lon):03d}"
             url = pattern.format(tile=tile)
+            try:
+                exists = requests.head(url, allow_redirects=True,
+                                        timeout=timeout).status_code == 200
+            except requests.RequestException:
+                exists = False
+            if not exists:
+                log.warning("dem13 %s: no tile at %s -- treating gap cell as "
+                            "water/no-land-coverage", tile, url)
+                continue
             rows.append({"url": url, "dest": str(dest / url.rsplit("/", 1)[1]),
                          "size": "", "source": "dem13", "tile": tile,
                          "bbox": f"{lon} {lat} {lon + 1} {lat + 1}"})

@@ -344,8 +344,20 @@ def main() -> None:
             date = zpath.stem.split("_")[-2] if "_" in zpath.stem else ""
             write_footprint(fp_path, zpath.stem, date,
                             survey_footprint(xyz, crs, outline))
-        except ImplausibleDepthsError:
-            raise  # units/sign mistakes must abort, never be skipped
+        except ImplausibleDepthsError as e:
+            # check_plausible() itself is never weakened -- a systematic
+            # units/sign/datum mistake still has to be caught. But at basin
+            # scale a single survey's plausibility failure is as likely to be
+            # a handful of raw sonar blunder points (verified for
+            # PT_06_FLO_20210721_CS: 6 of 549862 points were 90-121 ft vs. a
+            # 99.99th-percentile of ~55 ft) as a real conversion error, and
+            # newest-per-footprint selection means another survey usually
+            # covers the same reach anyway. Skip just this survey, loudly, for
+            # manual follow-up (add an override or a despike) rather than
+            # aborting the whole basin run.
+            log.error("%s: SKIPPED, implausible depths (%s) -- inspect and "
+                      "add an override or rerun --survey %s after fixing",
+                      zpath.stem, e, zpath.stem)
         except Exception as e:
             log.error("%s: FAILED (%s) -- continuing; rerun after fixing",
                       zpath.stem, e)

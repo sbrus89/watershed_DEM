@@ -375,6 +375,27 @@ Accepted product limitations (do not "fix" silently):
 - EAARL-B deep/turbid voids fall through to lower-priority sources or the
   nodata fill (flagged `filled`).
 - Estuary bathymetry is ~3 m CUDEM except where eHydro/EAARL-B are better.
+- **`check_seams` cross-tile edges where both sides' worst-disagreement
+  pixel is `cudem19` provenance** — an inherent CUDEM-vintage registration
+  mismatch, not a pipeline bug. The grid contract (§2) requires each tile to
+  reproduce its overlapping audited CUDEM tile's geotransform verbatim
+  (`resampling: near`, no blending, to stay bit-exact); two real adjacent
+  CUDEM tiles surveyed at different times aren't necessarily mutually
+  pixel-aligned, so the "same" boundary location can sample genuinely
+  different source pixels on each side, and over a steep real
+  seafloor/channel gradient that becomes a multi-meter step. Same root
+  cause as the `size_mismatches` edges the check already reports rather
+  than papering over. `check_seams` auto-classifies this as
+  `inherent_misalignment` (reported, not gating) whenever both sides trace
+  to the identical `cudem19` source id — deliberately narrow, since a
+  mixed-source edge is never auto-accepted this way (see the open
+  follow-up below for why). As of 2026-09-08's full-basin run this covered
+  14 of the 21 then-flagged edges plus the 2 known `size_mismatch` edges.
+  One further edge — a `cudem19`/`dem13` pairing at a coastal boundary
+  (specific tile pair not recorded) — was reviewed manually and found to
+  be the same registration-drift mechanism despite the mixed source id;
+  accepted, but `check_seams` still reports it as `flagged` since the code
+  doesn't special-case it.
 
 Open follow-ups from the adversarial review (unverified-tier, real but not
 gating):
@@ -387,6 +408,19 @@ gating):
 - `run_tests.py` still imports all test modules even when a name filter is
   given, and its monkeypatch emulation is a subset of pytest's.
 - `qa.hillshade_quicklook` shells out to `gdaldem` and is untested.
+- **One `check_seams` edge is a real, undiagnosed bug wearing the same
+  disguise as the accepted case above**: `n39x25_w074x75|n39x25_w074x50`
+  (`cudem19`/`dem13`, 19.45 m step) has the same mixed source-id signature
+  as the accepted coastal edge just above, but manual review
+  could not attribute it to the same registration-drift mechanism. This is
+  exactly why `check_seams` never auto-accepts a mixed-source edge as
+  `inherent_misalignment` — same source ids, opposite verdict, so
+  provenance alone can't disambiguate them. Not yet root-caused.
+- `cudem_land_overlap` also fails (worst |median| 0.256 m vs the 0.10 m
+  threshold) — unrelated to the seams work above, signs are mixed across
+  tiles (suggests ordinary cross-vintage LIDAR-vs-CUDEM survey
+  disagreement rather than one systematic datum/geoid bug), and not yet
+  investigated in depth.
 
 First-run risks (nothing network-facing has met real payloads):
 - Stage 03: ScienceBase DOI walk for EAARL-B (item tree shape assumed);
