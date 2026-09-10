@@ -138,7 +138,8 @@ def plot_tiles_on_imagery(cfg, out_png, zoom):
         label = name.replace("_", "\n")
         if c:
             mix = " ".join(f"{k[:4]} {c[k]:.0f}" for k in
-                           ("s1m", "cudem19", "ehydro") if c.get(k, 0) >= 1)
+                           ("s1m", "cudem19", "ehydro", "coned")
+                           if c.get(k, 0) >= 1)
             nd = c.get("nodata", 0)
             label += f"\n{mix}" + (f"\nnodata {nd:.0f}%" if nd >= 1 else "")
         ax.text(cx, cy, label, ha="center", va="center", fontsize=6.2,
@@ -172,6 +173,7 @@ def _stroke():
 def plot_mosaic(cfg, out_png, max_px):
     """All final tiles on one cmocean `topo` ramp, centred at NAVD88 zero."""
     import cmocean
+    import geopandas as gpd
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.patches as mpatches
@@ -214,6 +216,16 @@ def plot_mosaic(cfg, out_png, max_px):
     im = ax.imshow(z, extent=[b.left, b.right, b.bottom, b.top],
                    origin="upper", cmap=cmap, norm=norm,
                    interpolation="nearest")
+
+    handles = [mpatches.Patch(facecolor="#8c8c8c", edgecolor="k",
+                              label="no data (outside source coverage)")]
+    basin = dp.path("data", "intermediate", "huc4_0204.gpkg")
+    if basin.exists():
+        gpd.read_file(basin, layer="huc4").boundary.plot(
+            ax=ax, color="#ffe066", lw=1.4, zorder=3)
+        handles.append(mpatches.Patch(edgecolor="#ffe066", facecolor="none",
+                                      label="HUC-4 0204 boundary (clipped)"))
+
     ax.set_xlabel("longitude"); ax.set_ylabel("latitude")
     ax.set_title(f"{cfg['project']['name']} {cfg['project']['version']}: "
                  f"merged topobathy, 1/{scale} of full resolution\n"
@@ -221,9 +233,7 @@ def plot_mosaic(cfg, out_png, max_px):
     cb = fig.colorbar(im, ax=ax, shrink=0.72, pad=0.02,
                       extend="both", label="elevation (m, NAVD88)")
     cb.ax.axhline(norm(0.0), color="k", lw=0.8)
-    ax.legend(handles=[mpatches.Patch(facecolor="#8c8c8c", edgecolor="k",
-                                      label="no data (outside source coverage)")],
-              loc="lower left", fontsize=8, framealpha=0.9)
+    ax.legend(handles=handles, loc="lower left", fontsize=8, framealpha=0.9)
     fig.tight_layout()
     fig.savefig(out_png, dpi=170, bbox_inches="tight")
     plt.close(fig)

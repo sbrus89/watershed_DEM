@@ -35,6 +35,10 @@ def test_source_ids_unique_and_cover_all_sources():
         assert name in ids, f"source_ids missing entry for {name}"
 
 
-def test_coned_disabled_by_default():
+def test_coned_enabled_and_basin_clipped():
     cfg = dp.load_config()
-    assert cfg["sources"]["coned"]["enabled"] is False
+    # Enabled 2026-09-10 to cover 3 offshore tiles with no CUDEM coverage.
+    # tileindex_zip must stay set alongside it -- without it, 03_discover
+    # would fall back to the ~95 GB unfiltered urllist (see coned_rows).
+    assert cfg["sources"]["coned"]["enabled"] is True
+    assert cfg["sources"]["coned"]["tileindex_zip"]

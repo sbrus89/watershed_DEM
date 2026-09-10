@@ -279,6 +279,7 @@ Two rules make that safe across an interrupted `make all`:
 | 08 composite | `08_composite_tile.py` (`--tile`/`--all`) | VRTs + mask + tile_grid.json | `data/intermediate/tiles/<name>{,_source}.tif` |
 | 09 cog | `09_make_cogs_vrt.py` | intermediate tiles | `data/final/tiles/dewatershed19_*.tif` (COG, DEFLATE, PREDICTOR=3), mosaic VRT + overviews |
 | 10 qa | `10_qa_checks.py` | final tiles + CUDEM + provenance | `data/final/qa/qa_report.json`, `coverage.csv`, hillshade quicklooks. Exits nonzero on hard-check failure. |
+| 11 overview | `plot_overview.py` | mosaic VRT, `tiles_0204.geojson`, `coverage.csv` (optional) | `data/final/quicklooks/dewatershed19_*_mosaic_topo.png`, `..._tiles_on_imagery.png`. Inspection only, feeds nothing downstream; fetches an Esri World Imagery basemap (cached under `.basemap_cache/`, offline on rerun). |
 
 Stage-03 gap-fallback logic: query S1M → union footprints → subtract from
 basin → query project 1-m for gap polygons → any residual gets 1/3″ 1° tiles.

@@ -254,11 +254,42 @@ def provenance_quicklook(tile_path: Path, out_dir: Path | None = None) -> Path:
     for value, colour in colours.items():
         rgb[arr == value] = colour
 
+    # Underlay the hillshade at reduced opacity so terrain relief still reads
+    # through the flat provenance colors. hillshade_quicklook is idempotent
+    # (skips if its PNG already exists), so this is cheap even when stage 10
+    # already generated it. Resized to arr's exact shape rather than trusted
+    # to match: gdal_translate's "-outsize 25% 25%" and this raster's own
+    # `// 4` downsample round independently and can differ by a pixel.
+    from PIL import Image
+
+    hs_png = hillshade_quicklook(tile_path, out_dir)
+    hillshade = np.asarray(Image.open(hs_png).convert("L").resize(
+        (arr.shape[1], arr.shape[0]), Image.BILINEAR))
+
+    overlay_alpha = 0.6
+    blended = (hillshade[..., None] * (1 - overlay_alpha)
+              + rgb * overlay_alpha).astype("u1")
+
     import matplotlib
     matplotlib.use("Agg")
+    import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
 
-    plt.imsave(png, rgb)
+    names = {v: k for k, v in ids.items()}
+    present = [v for v in colours if np.any(arr == v)]
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.imshow(blended)
+    ax.axis("off")
+    ax.set_title(tile_path.stem, fontsize=9)
+    handles = [mpatches.Patch(facecolor=np.array(colours[v]) / 255,
+                              edgecolor="black", linewidth=0.4,
+                              label=names.get(v, str(v)))
+               for v in present]
+    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.0, 1.0),
+              fontsize=7, framealpha=0.9, title="provenance")
+    fig.savefig(png, dpi=150, bbox_inches="tight")
+    plt.close(fig)
     return png
 
 

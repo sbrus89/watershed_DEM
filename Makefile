@@ -8,9 +8,9 @@ PY := python
 NPROC := 6
 
 .PHONY: all env test test-slice boundary audit discover download vrts ehydro \
-        watermask composite cogs qa clean-sentinels
+        watermask composite cogs qa overview clean-sentinels
 
-all: qa
+all: qa overview
 
 env:
 	mamba env create -f environment.yml || mamba env update -f environment.yml
@@ -60,6 +60,16 @@ cogs: manifests/09_cogs.done
 
 qa: manifests/09_cogs.done
 	$(PY) scripts/10_qa_checks.py
+
+# Inspection only -- nothing here feeds the product (see plot_overview.py's
+# docstring). Depends on the cogs sentinel (not the phony `qa` target) so a
+# `make all` rerun with nothing new to compose skips this too; the Esri
+# basemap tiles it fetches are cached under
+# data/final/quicklooks/.basemap_cache/, so a rerun after that cache is warm
+# is fast even though it isn't gated on `qa` having actually run.
+manifests/11_overview.done: manifests/09_cogs.done
+	$(PY) scripts/plot_overview.py && touch $@
+overview: manifests/11_overview.done
 
 clean-sentinels:
 	rm -f manifests/*.done

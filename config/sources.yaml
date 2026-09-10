@@ -118,9 +118,13 @@ sources:
   coned:
     role: water
     priority: 4
-    enabled: false     # 95 GB; enable only if QA finds water-coverage gaps
+    enabled: true      # enabled 2026-09-10: QA found water-coverage gaps
+                        # (3 offshore tiles with no CUDEM coverage at all);
+                        # basin-clipped via tileindex_zip in 03_discover_tiles,
+                        # not the full 95 GB/1560-file collection.
     bulk_index: "https://coast.noaa.gov/htdata/raster2/elevation/NewJersey_Delaware_Coned_Topobathy_DEM_2015_5040/"
     urllist: "https://coast.noaa.gov/htdata/raster2/elevation/NewJersey_Delaware_Coned_Topobathy_DEM_2015_5040/urllist5040.txt"
+    tileindex_zip: "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NewJersey_Delaware_Coned_Topobathy_DEM_2015_5040/tileindex_NewJersey_Delaware_Coned_Topobathy_DEM_2015.zip"
     dir: data/raw/coned
     resampling: average
 

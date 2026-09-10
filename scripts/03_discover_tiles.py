@@ -159,6 +159,83 @@ def ehydro_rows(cfg, basin_geom) -> list[dict]:
     return rows
 
 
+def coned_rows(cfg, basin_geom) -> list[dict]:
+    """Basin-intersecting CoNED tiles, via NOAA's published tile-index shapefile.
+
+    Unlike cudem19 (whose ncei19_* filenames encode their own lat/lon corner,
+    see select_cudem_urls in stage 02), CoNED filenames are opaque row/col
+    codes (NJ_DE_Topobathy_DEM_v2_{row}_{col}.tif) with no geographic meaning
+    -- the only way to know which tiles the basin actually needs is the
+    per-tile footprint polygon NOAA publishes alongside the collection. The
+    plain urllist has no bbox at all, so downloading it as before would
+    unconditionally queue the entire ~95 GB NJ/DE collection (1560 files)
+    regardless of --tile, since fetch_manifest's bounds filter passes any row
+    without a bbox through unfiltered.
+    """
+    import zipfile
+
+    from dem_pipeline.download import fetch
+
+    scfg = cfg["sources"]["coned"]
+    dest = dp.path(scfg["dir"])
+    cache_dir = dp.path("manifests", "cache")
+    zip_path = fetch(scfg["tileindex_zip"], cache_dir / "coned_tileindex.zip")
+    extract_dir = cache_dir / "coned_tileindex"
+    if not extract_dir.exists():
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(extract_dir)
+    shp = next(extract_dir.glob("*.shp"))
+
+    import geopandas as gpd
+
+    idx = gpd.read_file(shp)
+    if idx.crs is not None and idx.crs.to_epsg() != 4269:
+        idx = idx.to_crs(4269)
+    hits = idx[idx.intersects(basin_geom)]
+
+    # NOAA's tileindex is not fully backed by real S3 objects -- confirmed
+    # 2026-09-09 (see the coned-covers-offshore-gap memory) that some listed
+    # tiles 404. fetch_manifest raises once ALL rows finish if any failed, so
+    # a queued phantom tile would fail the whole basin download after every
+    # real file already succeeded. Probe existence up front instead, same
+    # rationale as dem13_rows' HEAD check above.
+    import requests
+
+    timeout = cfg["download"]["timeout_s"]
+    candidates = list(hits.iterrows())
+
+    def exists(row):
+        url = row[1]["url"]
+        try:
+            return url, requests.head(url, allow_redirects=True,
+                                       timeout=timeout).status_code == 200
+        except requests.RequestException:
+            return url, False
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    live = {}
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        for url, ok in ex.map(exists, candidates):
+            live[url] = ok
+
+    rows = []
+    n_missing = 0
+    for _, r in hits.iterrows():
+        url = r["url"]
+        if not live[url]:
+            n_missing += 1
+            continue
+        w, s, e, n = r.geometry.bounds
+        rows.append({"url": url, "dest": str(dest / url.rsplit("/", 1)[1]),
+                     "size": "", "source": "coned", "tile": "",
+                     "bbox": f"{w} {s} {e} {n}"})
+    log.info("CoNED: %d of %d basin-intersecting tiles exist on S3 (%d "
+             "listed in the tileindex but 404 -- treating as gaps)",
+             len(rows), len(hits), n_missing)
+    return rows
+
+
 def _resolve_doi_to_item(doi: str) -> str | None:
     """ScienceBase item id behind a DOI, via the doi.org redirect."""
     import requests
@@ -313,13 +390,7 @@ def main() -> None:
                                      nhd_url.rsplit("/", 1)[1])),
                  "size": "", "source": "nhdplushr", "tile": ""})
     if cfg["sources"]["coned"].get("enabled"):
-        import requests
-        r = requests.get(cfg["sources"]["coned"]["urllist"], timeout=120)
-        r.raise_for_status()
-        dest = dp.path(cfg["sources"]["coned"]["dir"])
-        rows += [{"url": u.strip(), "dest": str(dest / u.strip().rsplit("/", 1)[1]),
-                  "size": "", "source": "coned", "tile": ""}
-                 for u in r.text.splitlines() if u.strip().endswith(".tif")]
+        rows += coned_rows(cfg, basin_geom)
 
     for r_ in rows:
         r_.pop("_bbox", None)

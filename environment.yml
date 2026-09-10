@@ -16,6 +16,7 @@ dependencies:
   - tqdm
   - pyyaml
   - matplotlib-base
+  - cmocean
   - fiona
   - pyogrio
   - pytest
