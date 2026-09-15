@@ -257,6 +257,95 @@ def _slippy_tile_bounds(z: int, x: int, y: int) -> tuple[float, float, float, fl
     return west, south, east, north
 
 
+def _source_tifs() -> list[Path]:
+    cfg = _cfg()
+    tile_dir = dp.path(cfg["output"]["tile_dir"])
+    return dp.product_tifs(tile_dir, f"{cfg['project']['name']}_*_source.tif")
+
+
+# Real source ids run 0-99 (see config/sources.yaml's source_ids), so 255 is
+# safe to use as the mosaic VRT's own NoData: it marks pixels not covered by
+# any per-tile provenance raster (a gap in the lattice) without colliding
+# with id 0, which is a legitimate "nothing composited here" category that
+# can appear *inside* a real tile and must still render (as the per-tile
+# panel already does) rather than read as transparent.
+_MOSAIC_NODATA = 255
+
+
+def _source_mosaic_vrt() -> Path | None:
+    """Basin-wide provenance mosaic, lazily built from per-tile *_source.tif.
+
+    The pipeline only ever produces per-tile provenance rasters -- there's no
+    stage 09 equivalent for provenance the way there is for elevation
+    (data/final/<name>.vrt) -- so the viewer builds one itself, the same
+    "mosaic VRT + windowed reads" approach stage 09 uses, cached under its
+    own cache dir (never data/final/tiles/) since this is an inspection
+    artifact, not a pipeline product. Rebuilt whenever the tile count or
+    newest mtime changes, so a run that adds/rewrites tiles is picked up on
+    the next request without restarting the server.
+    """
+    import subprocess
+
+    tifs = _source_tifs()
+    if not tifs:
+        return None
+    sig = f"{len(tifs)}_{max(p.stat().st_mtime_ns for p in tifs)}"
+    vrt = _cache_dir() / f"source_mosaic_{sig}.vrt"
+    if not vrt.exists():
+        listfile = vrt.with_suffix(".inputs.txt")
+        listfile.write_text("\n".join(str(p) for p in tifs) + "\n")
+        subprocess.run(["gdalbuildvrt", "-q", "-overwrite", "-vrtnodata",
+                        str(_MOSAIC_NODATA), "-input_file_list", str(listfile),
+                        str(vrt)], check=True)
+    return vrt
+
+
+def render_source_tile(z: int, x: int, y: int, tile_px: int = 256) -> bytes:
+    """One 256x256 XYZ map tile of basin source provenance.
+
+    The provenance analogue of render_depth_tile: windowed straight from the
+    lazily-built mosaic VRT rather than a basin-scale intermediate, colorized
+    with the same palette as the per-tile source.png so the basin overlay and
+    a selected tile's provenance panel read consistently. Resampling is
+    nearest, not average -- these are categorical ids, and averaging them
+    would blend e.g. s1m (1) and cudem19 (13) into a meaningless value.
+    """
+    import rasterio
+    from PIL import Image
+    from rasterio.enums import Resampling
+    from rasterio.windows import from_bounds
+
+    vrt = _source_mosaic_vrt()
+    if vrt is None:
+        return _transparent_png(tile_px)
+
+    ids = _cfg()["compositing"]["source_ids"]
+    colors = {ids[name]: rgb for name, rgb in SOURCE_COLORS_BY_NAME.items()
+              if name in ids}
+
+    west, south, east, north = _slippy_tile_bounds(z, x, y)
+    with rasterio.open(vrt) as src:
+        b = src.bounds
+        if east <= b.left or west >= b.right or north <= b.bottom or south >= b.top:
+            return _transparent_png(tile_px)
+        nodata = src.nodata
+        window = from_bounds(west, south, east, north, transform=src.transform)
+        arr = src.read(1, window=window, out_shape=(tile_px, tile_px),
+                       resampling=Resampling.nearest, boundless=True,
+                       fill_value=nodata)
+    valid = arr != nodata
+    if not np.any(valid):
+        return _transparent_png(tile_px)
+    rgb = np.zeros(arr.shape + (3,), dtype="u1")
+    for value, colour in colors.items():
+        rgb[arr == value] = colour
+    alpha = np.where(valid, 255, 0).astype("u1")
+    img = Image.fromarray(np.dstack([rgb, alpha]), "RGBA")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
 def render_depth_tile(z: int, x: int, y: int, tile_px: int = 256) -> bytes:
     """One 256x256 XYZ map tile of basin elevation, windowed straight from the VRT.
 
@@ -399,8 +488,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": "vrt not found"}, 404)
                 else:
                     self._send_json(depth_legend())
+            elif path == "/api/source_legend":
+                if _source_mosaic_vrt() is None:
+                    self._send_json({"error": "no provenance rasters found"}, 404)
+                else:
+                    self._send_json(source_legend())
             elif path.startswith("/api/depth_tile/"):
                 self._handle_depth_tile(path)
+            elif path.startswith("/api/source_tile/"):
+                self._handle_source_tile(path)
             elif path.startswith("/api/tile/"):
                 self._handle_tile(path, qs)
             else:
@@ -466,6 +562,26 @@ class Handler(BaseHTTPRequestHandler):
         key = f"depth_{z}_{x}_{y}_{vrt.stat().st_mtime_ns}"
         png = _cached_png(hashlib.sha1(key.encode()).hexdigest(),
                           lambda: render_depth_tile(z, x, y))
+        self._send(200, png, "image/png")
+
+    def _handle_source_tile(self, path: str):
+        # /api/source_tile/<z>/<x>/<y>.png
+        parts = path.split("/")
+        if len(parts) != 6 or not parts[5].endswith(".png"):
+            self._send_json({"error": "bad path"}, 404)
+            return
+        try:
+            z, x, y = int(parts[3]), int(parts[4]), int(parts[5][:-4])
+        except ValueError:
+            self._send_json({"error": "bad tile coordinates"}, 400)
+            return
+        vrt = _source_mosaic_vrt()
+        if vrt is None:
+            self._send_json({"error": "no provenance rasters found"}, 404)
+            return
+        key = f"source_{z}_{x}_{y}_{vrt.stat().st_mtime_ns}"
+        png = _cached_png(hashlib.sha1(key.encode()).hexdigest(),
+                          lambda: render_source_tile(z, x, y))
         self._send(200, png, "image/png")
 
 

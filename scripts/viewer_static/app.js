@@ -244,6 +244,55 @@
     if (depthLayer) depthLayer.setOpacity(opacitySlider.value / 100);
   });
 
+  // ---- sources (provenance) layer toggle -----------------------------------
+  //
+  // Same approach as the depth layer: a real XYZ tile layer read window-by-
+  // window off a mosaic (see /api/source_tile/{z}/{x}/{y}.png), colorized
+  // with the same palette the per-tile provenance panel already uses, so the
+  // basin overlay and a selected tile's "overlay source provenance" reading
+  // agree with each other.
+
+  const sourcesToggle = document.getElementById("sourcesToggle");
+  const sourcesOpacityRow = document.getElementById("sourcesOpacityRow");
+  const sourcesOpacitySlider = document.getElementById("sourcesOpacitySlider");
+  const sourcesOpacityLabel = document.getElementById("sourcesOpacityLabel");
+  let sourcesLayer = null;
+  let sourcesAvailablePromise = null;
+
+  function ensureSourcesAvailable() {
+    if (!sourcesAvailablePromise) {
+      sourcesAvailablePromise = fetch("/api/source_legend").then((r) => {
+        if (!r.ok) throw new Error("sources layer not available");
+      });
+    }
+    return sourcesAvailablePromise;
+  }
+
+  sourcesToggle.addEventListener("change", () => {
+    sourcesOpacityRow.hidden = !sourcesToggle.checked;
+    if (!sourcesToggle.checked) {
+      if (sourcesLayer) map.removeLayer(sourcesLayer);
+      return;
+    }
+    ensureSourcesAvailable().then(() => {
+      if (!sourcesLayer) {
+        sourcesLayer = L.tileLayer("/api/source_tile/{z}/{x}/{y}.png", {
+          opacity: sourcesOpacitySlider.value / 100, maxZoom: 18, maxNativeZoom: 15,
+        });
+      }
+      sourcesLayer.addTo(map);
+    }).catch(() => {
+      sourcesToggle.checked = false;
+      sourcesOpacityRow.hidden = true;
+      window.alert("Sources layer not available -- no provenance rasters found yet.");
+    });
+  });
+
+  sourcesOpacitySlider.addEventListener("input", () => {
+    sourcesOpacityLabel.textContent = `${sourcesOpacitySlider.value}%`;
+    if (sourcesLayer) sourcesLayer.setOpacity(sourcesOpacitySlider.value / 100);
+  });
+
   // ---- load tiles and fit map --------------------------------------------
 
   fetch("/api/tiles.geojson").then((r) => r.json()).then((fc) => {
