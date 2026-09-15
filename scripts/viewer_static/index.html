@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DE watershed DEM &mdash; tile viewer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="controls">
+    <div id="title">DE watershed DEM</div>
+    <label class="row">
+      <input type="checkbox" id="depthToggle">
+      depth (elevation) layer
+    </label>
+    <div class="row" id="opacityRow" hidden>
+      <input type="range" id="opacitySlider" min="0" max="100" value="70">
+      <span id="opacityLabel">70%</span>
+    </div>
+    <div id="depthLegend" hidden>
+      <div id="depthGradient"></div>
+      <div id="depthTicks">
+        <span id="depthLo"></span>
+        <span id="depthZero">0</span>
+        <span id="depthHi"></span>
+      </div>
+      <div class="legendCaption">m, NAVD88</div>
+    </div>
+    <div id="legend"></div>
+  </div>
+
+  <div id="panel" hidden>
+    <button id="panelClose" aria-label="close">&times;</button>
+    <h2 id="panelTitle"></h2>
+    <div id="panelFlags"></div>
+    <div id="panelCoverage"></div>
+    <div id="panelTabs">
+      <button class="tabBtn active" data-tab="hillshade">hillshade</button>
+      <button class="tabBtn" data-tab="depth">depth</button>
+    </div>
+    <label class="row">
+      <input type="checkbox" id="sourceOverlayToggle">
+      overlay source provenance
+    </label>
+    <div class="row" id="sourceOpacityRow" hidden>
+      <input type="range" id="sourceOpacitySlider" min="0" max="100" value="60">
+      <span id="sourceOpacityLabel">60%</span>
+    </div>
+    <div id="panelImageWrap">
+      <img id="panelImage" alt="tile render">
+      <img id="panelSourceOverlay" alt="source provenance overlay" hidden>
+      <div id="panelImageStatus"></div>
+    </div>
+  </div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
