@@ -99,7 +99,7 @@ def plot_tiles_on_imagery(cfg, out_png, zoom):
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
 
-    with open(dp.path("config", "tiles_0204.geojson")) as f:
+    with open(dp.output_tiles_geojson(cfg)) as f:
         fc = json.load(f)
     tiles = gpd.GeoDataFrame.from_features(fc["features"], crs="EPSG:4269")
 
@@ -124,11 +124,11 @@ def plot_tiles_on_imagery(cfg, out_png, zoom):
     ax.imshow(img, extent=[extent[0], extent[1], extent[2], extent[3]],
               origin="upper", interpolation="bilinear")
 
-    basin = dp.path("data", "intermediate", "huc4_0204.gpkg")
+    basin = dp.huc4_boundary_gpkg(cfg)
     if basin.exists():
         gpd.read_file(basin, layer="huc4").boundary.plot(
             ax=ax, color="#ffe066", lw=2.0, zorder=3,
-            label="HUC-4 0204 boundary (clipped)")
+            label=f"HUC-4 {cfg['project']['huc4']} boundary (clipped)")
 
     tiles.boundary.plot(ax=ax, color="#ff3b30", lw=1.3, zorder=4)
     for _, row in tiles.iterrows():
@@ -219,12 +219,13 @@ def plot_mosaic(cfg, out_png, max_px):
 
     handles = [mpatches.Patch(facecolor="#8c8c8c", edgecolor="k",
                               label="no data (outside source coverage)")]
-    basin = dp.path("data", "intermediate", "huc4_0204.gpkg")
+    basin = dp.huc4_boundary_gpkg(cfg)
     if basin.exists():
         gpd.read_file(basin, layer="huc4").boundary.plot(
             ax=ax, color="#ffe066", lw=1.4, zorder=3)
-        handles.append(mpatches.Patch(edgecolor="#ffe066", facecolor="none",
-                                      label="HUC-4 0204 boundary (clipped)"))
+        handles.append(mpatches.Patch(
+            edgecolor="#ffe066", facecolor="none",
+            label=f"HUC-4 {cfg['project']['huc4']} boundary (clipped)"))
 
     ax.set_xlabel("longitude"); ax.set_ylabel("latitude")
     ax.set_title(f"{cfg['project']['name']} {cfg['project']['version']}: "

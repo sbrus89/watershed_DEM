@@ -13,7 +13,8 @@ cd "$(dirname "$0")/.."
 NPROC="${1:-12}"
 TILES=$(python -c "
 import json
-fc = json.load(open('config/tiles_0204.geojson'))
+import dem_pipeline as dp
+fc = json.load(open(dp.output_tiles_geojson()))
 print('\n'.join(f['properties']['tile'] for f in fc['features']))")
 N=$(echo "$TILES" | wc -l)
 

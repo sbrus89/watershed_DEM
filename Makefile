@@ -6,6 +6,7 @@
 
 PY := python
 NPROC := 6
+HUC4 := $(shell $(PY) -c "import dem_pipeline as dp; print(dp.load_config()['project']['huc4'])")
 
 .PHONY: all env test test-slice boundary audit discover download vrts ehydro \
         watermask composite cogs qa overview clean-sentinels
@@ -50,7 +51,7 @@ manifests/07_watermask.done: manifests/04_download.done manifests/06_ehydro.done
 watermask: manifests/07_watermask.done
 
 manifests/08_composite.done: manifests/05_vrts.done manifests/06_ehydro.done manifests/07_watermask.done
-	jq -r '.features[].properties.tile' config/tiles_0204.geojson | \
+	jq -r '.features[].properties.tile' config/tiles_$(HUC4).geojson | \
 	  parallel -j$(NPROC) $(PY) scripts/08_composite_tile.py --tile {} && touch $@
 composite: manifests/08_composite.done
 

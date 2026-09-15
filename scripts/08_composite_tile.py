@@ -19,7 +19,7 @@ log = logging.getLogger("08_composite_tile")
 
 
 def all_tiles() -> list[str]:
-    with open(dp.path("config", "tiles_0204.geojson")) as f:
+    with open(dp.output_tiles_geojson()) as f:
         fc = json.load(f)
     return [f_["properties"]["tile"] for f_ in fc["features"]]
 

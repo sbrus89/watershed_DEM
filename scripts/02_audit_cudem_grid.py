@@ -127,9 +127,7 @@ def main() -> None:
     import geopandas as gpd
     from shapely.geometry import box, mapping
 
-    boundary = gpd.read_file(
-        dp.path("data", "intermediate", "huc4_0204.gpkg"), layer="huc4_buffered"
-    )
+    boundary = gpd.read_file(dp.huc4_boundary_gpkg(cfg), layer="huc4_buffered")
     basin_geom = boundary.geometry.union_all()
 
     urls = select_cudem_urls(cfg, basin_geom)
@@ -174,7 +172,7 @@ def main() -> None:
             "properties": {"tile": n, "has_cudem": n in spec.cudem_geotransforms},
             "geometry": mapping(box(w, s, e, no)),
         })
-    out = dp.path("config", "tiles_0204.geojson")
+    out = dp.output_tiles_geojson(cfg)
     with open(out, "w") as f:
         json.dump({"type": "FeatureCollection", "features": features}, f)
     log.info("wrote %s: %d output tiles (%d with CUDEM overlap)",

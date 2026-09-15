@@ -61,7 +61,7 @@ def main() -> None:
         .to_frame("geometry")
     )
 
-    out = dp.path("data", "intermediate", "huc4_0204.gpkg")
+    out = dp.huc4_boundary_gpkg(cfg)
     out.parent.mkdir(parents=True, exist_ok=True)
     basin.to_file(out, layer="huc4", driver="GPKG")
     buffered.to_file(out, layer="huc4_buffered", driver="GPKG")

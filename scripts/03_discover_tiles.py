@@ -351,9 +351,7 @@ def main() -> None:
 
     import geopandas as gpd
 
-    boundary = gpd.read_file(
-        dp.path("data", "intermediate", "huc4_0204.gpkg"), layer="huc4_buffered"
-    )
+    boundary = gpd.read_file(dp.huc4_boundary_gpkg(cfg), layer="huc4_buffered")
     basin_geom = boundary.geometry.union_all()
 
     rows: list[dict] = []

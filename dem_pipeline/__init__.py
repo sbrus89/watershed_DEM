@@ -27,6 +27,24 @@ def path(*parts: str) -> Path:
     return REPO_ROOT.joinpath(*parts)
 
 
+def huc4_boundary_gpkg(cfg: dict | None = None) -> Path:
+    """Stage 01's basin boundary GeoPackage for the configured HUC-4.
+
+    Named by huc4 rather than hard-coded, so a checkout configured for a
+    different watershed (a different config/sources.yaml) gets its own
+    self-descriptive filename instead of writing over/reading a name that
+    still says another basin's HUC-4.
+    """
+    cfg = cfg or load_config()
+    return path("data", "intermediate", f"huc4_{cfg['project']['huc4']}.gpkg")
+
+
+def output_tiles_geojson(cfg: dict | None = None) -> Path:
+    """Stage 02's output tile list for the configured HUC-4. See huc4_boundary_gpkg."""
+    cfg = cfg or load_config()
+    return path("config", f"tiles_{cfg['project']['huc4']}.geojson")
+
+
 def product_tifs(directory: str | Path, pattern: str = "*.tif") -> list[Path]:
     """Sorted rasters in *directory*, excluding interrupted writers' scratch
     files.

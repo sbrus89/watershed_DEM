@@ -401,9 +401,9 @@ def depth_legend() -> dict:
 
 
 def build_tiles_geojson() -> dict:
-    """config/tiles_0204.geojson features, enriched with coverage/QA flags."""
+    """The configured HUC-4's output tile list, enriched with coverage/QA flags."""
     cfg = _cfg()
-    with open(dp.path("config", "tiles_0204.geojson")) as f:
+    with open(dp.output_tiles_geojson(cfg)) as f:
         fc = json.load(f)
 
     coverage, land_overlap = {}, {}
@@ -442,17 +442,17 @@ def source_legend() -> dict:
 
 @lru_cache(maxsize=1)
 def basin_boundary_geojson() -> dict:
-    """HUC-4 0204 basin boundary -- stage 01's dissolved WBD polygon.
+    """The configured HUC-4's basin boundary -- stage 01's dissolved WBD polygon.
 
     Served straight from its native NAD83 (EPSG:4269) coordinates, same as
-    config/tiles_0204.geojson: nothing in this app reprojects to WGS84, and
-    the NAD83/WGS84 difference is sub-meter here, invisible at map scale.
-    Cached for the server's lifetime -- this file is a stage 01 input,
-    never touched again once the pipeline has run.
+    the output tile list: nothing in this app reprojects to WGS84, and the
+    NAD83/WGS84 difference is sub-meter here, invisible at map scale. Cached
+    for the server's lifetime -- this file is a stage 01 input, never
+    touched again once the pipeline has run.
     """
     import geopandas as gpd
 
-    gdf = gpd.read_file(dp.path("data", "intermediate", "huc4_0204.gpkg"), layer="huc4")
+    gdf = gpd.read_file(dp.huc4_boundary_gpkg(), layer="huc4")
     return json.loads(gdf.to_json())
 
 
@@ -499,7 +499,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/tiles.geojson":
                 self._send_json(build_tiles_geojson())
             elif path == "/api/basin_boundary.geojson":
-                gpkg = dp.path("data", "intermediate", "huc4_0204.gpkg")
+                gpkg = dp.huc4_boundary_gpkg()
                 if not gpkg.exists():
                     self._send_json({"error": "boundary not found"}, 404)
                 else:
