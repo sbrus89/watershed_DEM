@@ -293,6 +293,22 @@
     if (sourcesLayer) sourcesLayer.setOpacity(sourcesOpacitySlider.value / 100);
   });
 
+  // ---- basin boundary -----------------------------------------------------
+  //
+  // The HUC-4 0204 watershed polygon (stage 01's dissolved WBD boundary,
+  // config/tile discovery's own basin clip) -- a plain reference outline,
+  // not clickable and carrying no per-feature panel like the tile lattice.
+
+  fetch("/api/basin_boundary.geojson").then((r) => {
+    if (!r.ok) throw new Error("no basin boundary");
+    return r.json();
+  }).then((fc) => {
+    L.geoJSON(fc, {
+      interactive: false,
+      style: { color: "#ffe066", weight: 2.5, fill: false },
+    }).addTo(map);
+  }).catch(() => {});
+
   // ---- load tiles and fit map --------------------------------------------
 
   fetch("/api/tiles.geojson").then((r) => r.json()).then((fc) => {

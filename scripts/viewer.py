@@ -440,6 +440,22 @@ def source_legend() -> dict:
             for name, rgb in SOURCE_COLORS_BY_NAME.items() if name in ids}
 
 
+@lru_cache(maxsize=1)
+def basin_boundary_geojson() -> dict:
+    """HUC-4 0204 basin boundary -- stage 01's dissolved WBD polygon.
+
+    Served straight from its native NAD83 (EPSG:4269) coordinates, same as
+    config/tiles_0204.geojson: nothing in this app reprojects to WGS84, and
+    the NAD83/WGS84 difference is sub-meter here, invisible at map scale.
+    Cached for the server's lifetime -- this file is a stage 01 input,
+    never touched again once the pipeline has run.
+    """
+    import geopandas as gpd
+
+    gdf = gpd.read_file(dp.path("data", "intermediate", "huc4_0204.gpkg"), layer="huc4")
+    return json.loads(gdf.to_json())
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "DEViewer/1.0"
 
@@ -482,6 +498,12 @@ class Handler(BaseHTTPRequestHandler):
                                  "legend": source_legend()})
             elif path == "/api/tiles.geojson":
                 self._send_json(build_tiles_geojson())
+            elif path == "/api/basin_boundary.geojson":
+                gpkg = dp.path("data", "intermediate", "huc4_0204.gpkg")
+                if not gpkg.exists():
+                    self._send_json({"error": "boundary not found"}, 404)
+                else:
+                    self._send_json(basin_boundary_geojson())
             elif path == "/api/depth_legend":
                 cfg = _cfg()
                 if not dp.path(cfg["output"]["vrt"]).exists():
