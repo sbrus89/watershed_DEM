@@ -1,32 +1,45 @@
-# Data sources and pipeline configuration for the Delaware basin (HUC-4 0204)
-# seamless 1/9 arc-second topobathy DEM.
+# Data sources and pipeline configuration for the Susquehanna basin
+# (HUC-4 0205: 020501 Upper Susquehanna, 020502 West Branch Susquehanna,
+# 020503 Lower Susquehanna) seamless 1/9 arc-second topobathy DEM.
+#
+# Third basin in the HUC 02 (Mid-Atlantic) rollout, after Delaware (0204,
+# original checkout) and Upper Chesapeake (0206, full production run
+# complete). Built from the Chesapeake config: most of the pipeline is
+# basin-agnostic and reused verbatim; project/, nhdplushr.url, and
+# vdatum.sample_bounds/benchmark_stations are Susquehanna-specific.
+#
+# Unlike Delaware/Chesapeake, this basin is overwhelmingly NON-TIDAL --
+# Conowingo Dam (39.656N) is a hard head-of-tide barrier well upstream of the
+# bay. Confirmed live 2026-10-09: a VDatum point at Port Deposit (39.610N,
+# 5 km below the dam) returns -999999 (outside the tidal interpolation grid
+# entirely); a point at the Havre de Grace mouth (39.544N, inside HUC-4 0205
+# per the WBD polygon -- the 0205/0206 boundary runs right through the
+# Susquehanna Flats) returns a plausible separation (0.343 m, 0.092 m
+# uncertainty). So the eHydro/VDatum machinery is real but applies to only a
+# narrow ~2 km fringe at the extreme southern tip of the basin, not a whole
+# estuary. Everywhere else in this basin, water handling reduces to NHDPlus
+# HR lake/river polygons composited straight from lidar (no bathymetry
+# source needed or expected).
 #
 # All vertical datums are NAVD88 meters unless noted. All endpoints verified
-# live in Aug 2026.
+# live in Oct 2026.
 
 project:
-  name: dewatershed19
+  name: susquehanna19
   version: 2026v1
-  huc4: "0204"
-  # HUC-6 subsets, for reference: 020401 (Upper Delaware), 020402 (Lower
-  # Delaware), 020403 (NJ Atlantic coastal). Domain = all of 0204.
+  huc4: "0205"
+  # HUC-6 subsets, for reference: 020501 (Upper Susquehanna), 020502 (West
+  # Branch Susquehanna), 020503 (Lower Susquehanna). Domain = all of 0205.
   boundary_buffer_m: 2000
-  # Coarse pre-filter ONLY, for the TNM API fallback when the basin polygon
-  # will not fit in a request URL (03_discover_tiles.py). This is not the
-  # domain -- do not shrink it to restrict the run; use clip_bbox instead.
-  # NB: HUC-4 0204 is "Delaware-Mid Atlantic Coastal" and reaches 36.8N (the
-  # whole Delmarva), so this box is deliberately wider than the old 38.4 edge.
-  bbox: [-76.4, 36.7, -73.9, 42.5]
+  # Coarse pre-filter ONLY, for the TNM API fallback (03_discover_tiles.py).
+  # This is not the domain -- do not shrink it to restrict the run; use
+  # clip_bbox instead. Basin bounds are W-78.91 S39.53 E-74.58 N42.99 (from
+  # WBDHU4, pulled 2026-10-09); widened with margin here.
+  bbox: [-79.2, 39.3, -74.3, 43.2]
   # Development clip [W, S, E, N]: restrict the domain to a sub-region.
-  # null = the full HUC-4. Stage 01 intersects the basin with this box, and
-  # everything downstream (CUDEM selection, the output tile list, and all
-  # source discovery) derives from that boundary -- so this one knob narrows
-  # the entire pipeline. Set back to null for the production run.
-  # Tidal Delaware: head of tide at Trenton down to the bay mouth. Chosen to
-  # sit inside the chesapeak_delaware VDatum region (see vdatum.sample_bounds)
-  # -- pushing the east edge past ~-74.9 reaches the NJ Atlantic shore, which
-  # needs a second region and would leave the separation raster undefined.
-  clip_bbox: null   # full HUC-4 0204 production run
+  # null = the full HUC-4. See run_test_slice.sh for single-tile validation,
+  # which does not need this -- it restricts stages 04+ via --tile instead.
+  clip_bbox: null
 
 target_grid:
   epsg: 4269                  # NAD83 geographic; audit (stage 02) must confirm
@@ -42,11 +55,14 @@ tnm_api:
   page_size: 200
 
 wbd:
+  # Region-02 GPKG already covers every HUC-4 in the Mid-Atlantic, including
+  # 0205 -- same file the Delaware/Chesapeake checkouts use, no change needed.
   url: "https://prd-tnm.s3.amazonaws.com/StagedProducts/Hydrography/WBD/HU2/GPKG/WBD_02_HU2_GPKG.zip"
 
 nhdplushr:
-  # Staged NHDPlus HR GDB for HUC-4 0204 (water-mask polygons).
-  url: "https://prd-tnm.s3.amazonaws.com/StagedProducts/Hydrography/NHDPlusHR/Beta/GDB/NHDPLUS_H_0204_HU4_GDB.zip"
+  # Staged NHDPlus HR GDB for HUC-4 0205 (water-mask polygons). Confirmed
+  # live (HTTP 200) 2026-10-09.
+  url: "https://prd-tnm.s3.amazonaws.com/StagedProducts/Hydrography/NHDPlusHR/Beta/GDB/NHDPLUS_H_0205_HU4_GDB.zip"
   # Feature classes / FTypes used for the water mask:
   nhdarea_ftypes: [460, 445, 336]      # StreamRiver, SeaOcean, CanalDitch
   nhdwaterbody_ftypes: [390, 436, 493] # LakePond, Reservoir, Estuary
@@ -59,7 +75,7 @@ sources:
     priority: 1
     tnm_dataset: "Seamless 1-m DEM (S1M)"
     dir: data/raw/s1m
-    crs_note: "NAD83(2011) UTM 18N expected basin-wide"
+    crs_note: "Basin spans UTM 17N/18N (NY/PA/MD) -- unlike Delaware/Chesapeake, NOT a single UTM zone. 05_build_source_vrts.py's per-tile VRT warp handles this already; flagging here since the single-zone assumption in other basins' configs does not hold."
     resampling: average
   dem1m_projects:
     role: land
@@ -80,13 +96,18 @@ sources:
     role: water
     priority: 1
     feature_server: "https://services7.arcgis.com/n1YM8pTrFmm7L4hs/arcgis/rest/services/eHydro_Survey_Data/FeatureServer/0/query"
-    district: CENAP
+    # Baltimore District -- confirmed live 2026-10-09: recent (2019, 2017)
+    # "Susquehanna River" surveys exist under CENAB right at the tidal mouth
+    # near Havre de Grace (tile n39x75_w076x25). Not expected to return
+    # anything meaningful elsewhere in this overwhelmingly non-tidal basin.
+    district: CENAB
     dir: data/raw/ehydro
     grid_dir: data/intermediate/ehydro_grids
     grid_res_m: 3.0
-    # CENAP soundings: depth in feet, positive down, referenced to MLLW.
-    # Overridable per survey in manifests/ehydro_overrides.yaml if the audit
-    # flags an exception.
+    # Same convention as CENAP/Chesapeake's CENAB surveys (feet, positive
+    # down, MLLW) -- not yet verified against this basin's own survey
+    # metadata. Override per-survey in manifests/ehydro_overrides.yaml if the
+    # audit flags an exception.
     depth_units: feet
     depth_positive_down: true
     vertical_ref: MLLW
@@ -94,19 +115,24 @@ sources:
   eaarlb:
     role: water
     priority: 2
+    # Delaware-specific dataset (Hancock NY -> Portland PA lidar bathymetry);
+    # kept configured only because dem_pipeline.composite.WATER_SOURCES is a
+    # code-level list that always includes "eaarlb" (compose_tile looks it up
+    # unconditionally). This basin's own upper reaches (Hancock, NY sits
+    # right on the Delaware/Susquehanna divide) are close to EAARL-B's
+    # footprint but not confirmed to overlap it -- 03_discover_tiles.py's
+    # geo-filter will resolve this correctly either way (zero tiles if no
+    # overlap, same as Chesapeake).
     doi: "10.5066/P97031JU"
-    # ScienceBase's ?filter=doi=... is SILENTLY IGNORED -- it returns the whole
-    # 19M-item catalog rather than an error, which made discovery walk 20
-    # arbitrary items and find nothing. The item id is resolved through the
-    # doi.org redirect instead; this pin skips that and is the fallback if
-    # resolution ever breaks. Verified 2026-08-27: 23 zips + xml, 0.65 GB,
-    # including topobathy_voids.zip (the lidar-void polygons).
     sciencebase_item: "5f43b4cf82ce4c3d1222d2a5"
     dir: data/raw/eaarlb
     resampling: average
   cudem19:
     role: water
     priority: 3
+    # Same NCEI ninth-arcsecond dataset (8483) as Delaware/Chesapeake.
+    # Confirmed live 2026-10-09: chesapeake_bay prefix has tiles at
+    # n39x50_w076x25 and n39x75_w076x25, covering the Havre de Grace mouth.
     s3_prefixes:
       - "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NCEI_ninth_Topobathy_2014_8483/northeast_sandy/"
       - "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NCEI_ninth_Topobathy_2014_8483/chesapeake_bay/"
@@ -118,10 +144,10 @@ sources:
   coned:
     role: water
     priority: 4
-    enabled: true      # enabled 2026-09-10: QA found water-coverage gaps
-                        # (3 offshore tiles with no CUDEM coverage at all);
-                        # basin-clipped via tileindex_zip in 03_discover_tiles,
-                        # not the full 95 GB/1560-file collection.
+    # NJ/DE-specific collection -- nowhere near this basin. Left disabled,
+    # same posture Chesapeake started with; revisit only if stage 10 QA shows
+    # an uncovered water gap.
+    enabled: false
     bulk_index: "https://coast.noaa.gov/htdata/raster2/elevation/NewJersey_Delaware_Coned_Topobathy_DEM_2015_5040/"
     urllist: "https://coast.noaa.gov/htdata/raster2/elevation/NewJersey_Delaware_Coned_Topobathy_DEM_2015_5040/urllist5040.txt"
     tileindex_zip: "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NewJersey_Delaware_Coned_Topobathy_DEM_2015_5040/tileindex_NewJersey_Delaware_Coned_Topobathy_DEM_2015.zip"
@@ -130,58 +156,51 @@ sources:
 
 vdatum:
   # MLLW -> NAVD88 separation, sampled from the VDatum transformation service.
-  #
-  # Do NOT go back to composing the raw tss/mllw .gtx grids by hand: measured
-  # against this service at 11 CO-OPS gauges, `mllw` alone is off by up to
-  # 0.18 m and `tss + mllw` by up to 0.70 m, both with a systematic
-  # along-estuary trend. The service reproduces the gauges to 0.026 m median /
-  # 0.082 m max -- inside its own published uncertainty -- so it is the
-  # authority, not our arithmetic.
+  # See Delaware's config for why the service is authoritative over composing
+  # tss/mllw .gtx grids by hand -- same reasoning applies here unchanged.
   service_url: "https://vdatum.noaa.gov/vdatumweb/api/convert"
+  # "chesapeak_delaware" is NOAA's actual combined Chesapeake+Delaware Bay
+  # VDatum region -- reused verbatim from Chesapeake. Live-tested 2026-10-09
+  # at the Havre de Grace mouth (-76.0897, 39.5440): returns a plausible
+  # separation (0.343 m, 0.092 m uncertainty) and correctly rejects
+  # NAD83_2011 as source frame ("Source Horizontal Frame should be IGS14 for
+  # Tidal"), same as Delaware/Chesapeake. A point 5 km further upstream at
+  # Port Deposit (-76.1114, 39.6095) returns t_z=-999999 (VDatum's no-data
+  # sentinel) -- confirms the tidal reach inside this basin ends well before
+  # Conowingo Dam, within a couple km of the mouth.
   region: chesapeak_delaware
-  # This region REJECTS NAD83_2011 as the source frame for tidal datums
-  # ("Source Horizontal Frame should be IGS14 for Tidal"), matching horz=IGS14
-  # in the grid distribution's .met file.
   source_h_frame: IGS14
   target_h_frame: NAD83_2011
   geoid: geoid18
-  # Sampling grid [W, S, E, N] -- the DEdelbay coverage, rounded outward.
-  # For the full HUC-4 the Atlantic coast needs a second region/pass.
-  sample_bounds: [-75.64, 38.74, -74.69, 40.26]
-  sample_spacing_deg: 0.05    # ~5 km; the separation field is smooth (-0.85
-                              # to -1.26 m over the whole estuary)
+  # Sampling grid [W, S, E, N] -- deliberately small and centered on the
+  # Havre de Grace mouth, NOT the full basin bbox above (this basin's tidal
+  # reach is a ~2 km fringe, far smaller than Delaware's or Chesapeake's).
+  # Widened slightly west/south to include the benchmark stations below
+  # (Baltimore, Tolchester Beach) for a well-conditioned interpolation.
+  sample_bounds: [-76.6, 39.1, -75.7, 39.8]
+  sample_spacing_deg: 0.05    # ~5 km; matches Delaware/Chesapeake's choice
   sep_res_deg: 0.005          # ~500 m output raster
   sample_cache: manifests/vdatum_samples.csv
   service_workers: 4          # be polite to NOAA
-  # Raster value = elevation of MLLW surface relative to NAVD88 (m), i.e.
-  # mllw_minus_navd88 (negative in this estuary); z_navd88 = z_mllw + value.
+  # Raster value = elevation of MLLW surface relative to NAVD88 (m);
+  # z_navd88 = z_mllw + value.
   sep_raster: data/intermediate/mllw_sep/sep_mllw_minus_navd88.tif
-  # NOAA CO-OPS stations used to sign/magnitude-verify the separation raster
-  # via the published datums API (expect NAVD88-MLLW ~ 0.5-0.9 m here).
-  # Every CO-OPS gauge inside the DEdelbay grid that publishes both MLLW and
-  # NAVD88, mouth to head of tide. Three stations (Lewes/Reedy Point/
-  # Philadelphia) could not tell a single outlier apart from a systematic
-  # along-estuary trend -- with 11 it is unmistakable, and this gate is the
-  # one protecting the pipeline's primary failure mode. Verified 2026-08-27.
+  # NOAA CO-OPS stations used to sign/magnitude-verify the separation raster.
+  # Reused verbatim from Chesapeake's confirmed-live list (physical stations,
+  # not basin-dependent) -- these are also the only three CO-OPS NAVD88
+  # stations within ~50 km of the Havre de Grace mouth; a direct search
+  # 2026-10-09 found no CO-OPS station closer to the mouth itself. Only 3
+  # stations (vs. Chesapeake's 8, Delaware's 11) given how small this basin's
+  # tidal footprint is -- if the benchmark gate's residuals don't cleanly
+  # separate a bad build from noise, that is the first thing to revisit.
   benchmark_stations:
-    - "8557380"   # Lewes                    38.783
-    - "8536110"   # Cape May                 38.968
-    - "8535055"   # Bivalve, Maurice River   39.233
-    - "8536931"   # Fortescue Creek          39.238
-    - "8551910"   # Reedy Point              39.558
-    - "8540433"   # Marcus Hook              39.812
-    - "8545240"   # Philadelphia             39.933
-    - "8545530"   # Philadelphia Pier 11     39.953
-    - "8538875"   # Pompeston Creek          40.013
-    - "8539487"   # Fieldsboro               40.137
-    - "8539993"   # Trenton Marine Terminal  40.188
+    - "8574680"   # Baltimore, Fort McHenry       39.267
+    - "8573364"   # Tolchester Beach              39.213
+    - "8573927"   # Chesapeake City, Maryland     39.527
   datums_api: "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/{station}/datums.json"
   station_api: "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/{station}.json"
-  # 0.10 m, set against the reference's accuracy rather than by preference:
-  # VDatum's own product misses these gauges by up to 0.082 m and publishes
-  # +/-0.09 m uncertainty here, so no correct implementation can hit 0.05 m.
-  # The gate keeps its teeth -- every error found on 2026-08-27 (0.18, 0.30,
-  # 0.42, 0.59 m) is still caught several times over.
+  # Same tolerance and rationale as Delaware/Chesapeake: set against the
+  # service's own published uncertainty, not preference.
   max_benchmark_residual_m: 0.10
 
 compositing:
@@ -201,7 +220,7 @@ compositing:
 
 output:
   tile_dir: data/final/tiles
-  vrt: data/final/dewatershed19_2026v1.vrt
+  vrt: data/final/susquehanna19_2026v1.vrt
   cog:
     compress: DEFLATE
     predictor: 3
