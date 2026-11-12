@@ -49,8 +49,14 @@ def extract_archives(raw_dir) -> int:
     return n
 
 
-def missing_downloads() -> dict:
+def missing_downloads(bounds=None) -> dict:
     """Manifest rows per source whose file is absent from disk.
+
+    With `bounds` (w, s, e, n), only rows intersecting them count -- the same
+    filter stage 04 applies under --tile. Without it, a single-tile test
+    slice false-failed whenever a gap-fill source (dem1m_projects) had
+    basin-wide rows outside the tile: stage 04 correctly fetched none of
+    them, and this check read that as an interrupted download.
 
     This is how stage 05 tells 'this source legitimately contributes no
     raster' apart from 'stage 04 did not finish'. Counting manifest rows
@@ -61,13 +67,15 @@ def missing_downloads() -> dict:
     """
     from collections import Counter
 
-    from dem_pipeline.download import read_manifest
+    from dem_pipeline.download import read_manifest, rows_in_bounds
 
     manifest = dp.path("manifests", "downloads.csv")
     if not manifest.exists():
         return {}
-    return Counter(r["source"] for r in read_manifest(manifest)
-                   if not Path(r["dest"]).exists())
+    rows = read_manifest(manifest)
+    if bounds:
+        rows = rows_in_bounds(rows, bounds)
+    return Counter(r["source"] for r in rows if not Path(r["dest"]).exists())
 
 
 def horizontal_epsg(path) -> int | None:
@@ -117,13 +125,20 @@ def build_vrt(name: str, tifs, vrt_dir) -> None:
 
 
 def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    from dem_pipeline.grid import nominal_extent
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--tile", default=None,
+                    help="only require downloads intersecting this tile "
+                         "(match the --tile given to stage 04)")
+    args = ap.parse_args()
     dp.setup_logging()
     cfg = dp.load_config()
 
     vrt_dir = dp.path("data", "intermediate", "vrt")
     vrt_dir.mkdir(parents=True, exist_ok=True)
-    missing = missing_downloads()
+    missing = missing_downloads(
+        nominal_extent(args.tile) if args.tile else None)
 
     for name in SOURCES:
         scfg = cfg["sources"][name]

@@ -149,6 +149,26 @@ def write_manifest(rows: list[dict], manifest_csv: Path) -> None:
     tmp.rename(manifest_csv)
 
 
+def rows_in_bounds(
+    rows: list[dict], bounds: tuple[float, float, float, float]
+) -> list[dict]:
+    """Manifest rows whose bbox intersects (w, s, e, n) bounds.
+
+    Rows without a bbox (vector bundles like WBD/NHD) always pass. Shared by
+    stage 04's --tile download filter and stage 05's --tile completeness
+    check, so the two can never disagree about which rows a tile needs.
+    """
+    w, s, e, n = bounds
+
+    def hits(r: dict) -> bool:
+        if not r.get("bbox"):
+            return True
+        bw, bs, be, bn = (float(v) for v in r["bbox"].split())
+        return bw < e and be > w and bs < n and bn > s
+
+    return [r for r in rows if hits(r)]
+
+
 def fetch_manifest(
     manifest_csv: Path,
     sources: list[str] | None = None,
@@ -163,15 +183,7 @@ def fetch_manifest(
     if sources:
         rows = [r for r in rows if r["source"] in sources]
     if bounds:
-        w, s, e, n = bounds
-
-        def hits(r: dict) -> bool:
-            if not r.get("bbox"):
-                return True
-            bw, bs, be, bn = (float(v) for v in r["bbox"].split())
-            return bw < e and be > w and bs < n and bn > s
-
-        rows = [r for r in rows if hits(r)]
+        rows = rows_in_bounds(rows, bounds)
 
     results: list[Path] = []
     failures: list[str] = []

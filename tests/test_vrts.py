@@ -135,3 +135,29 @@ def test_incomplete_download_is_told_apart_from_a_rasterless_source(
     assert missing.get("eaarlb", 0) == 0
     # s1m: a manifest file is absent -> stage 04 genuinely did not finish
     assert missing["s1m"] == 1
+
+
+def test_tile_bounds_ignore_out_of_tile_manifest_rows(tmp_path, monkeypatch):
+    """Single-tile test slice bug (Susquehanna 0205): stage 04 --tile fetched
+    none of dem1m_projects' 51 basin-wide gap tiles because none overlap the
+    test tile, and stage 05 -- with no tile filter -- reported all 51 as an
+    interrupted download and aborted. Under tile bounds, out-of-tile rows must
+    not count, but an in-tile row that is absent still must."""
+    manifest = tmp_path / "downloads.csv"
+    manifest.write_text(
+        "url,dest,size,source,tile,bbox\n"
+        # far from the tile: legitimately never downloaded
+        f"https://x/a,{tmp_path / 'far.tif'},1,dem1m_projects,,-77.0 41.0 -76.9 41.1\n"
+        # overlaps the tile but absent: a real incomplete download
+        f"https://x/b,{tmp_path / 'near.tif'},1,s1m,,-76.20 39.60 -76.10 39.70\n")
+    monkeypatch.setattr(vrts.dp, "path",
+                        lambda *parts: manifest if parts[-1] == "downloads.csv"
+                        else Path(*parts))
+    tile = (-76.25, 39.5, -76.0, 39.75)     # n39x75_w076x25
+
+    missing = vrts.missing_downloads(tile)
+    assert missing.get("dem1m_projects", 0) == 0
+    assert missing["s1m"] == 1
+
+    # no bounds (make all): every manifest row is expected on disk
+    assert vrts.missing_downloads()["dem1m_projects"] == 1
