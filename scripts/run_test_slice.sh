@@ -16,7 +16,7 @@ python scripts/01_get_boundary.py
 python scripts/02_audit_cudem_grid.py
 python scripts/03_discover_tiles.py
 python scripts/04_download.py --tile "${TILE}"
-python scripts/05_build_source_vrts.py
+python scripts/05_build_source_vrts.py --tile "${TILE}"
 python scripts/06_process_ehydro.py
 python scripts/07_build_water_mask.py
 python scripts/08_composite_tile.py --tile "${TILE}"
