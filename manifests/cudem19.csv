@@ -1,0 +1,3 @@
+url,dest,size,source,tile,bbox
+https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NCEI_ninth_Topobathy_2014_8483/chesapeake_bay/ncei19_n39x75_w076x00_2019v1.tif,/pscratch/sd/s/sbrus/Susquehanna_watershed_DEM/data/raw/cudem19/ncei19_n39x75_w076x00_2019v1.tif,,cudem19,,
+https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NCEI_ninth_Topobathy_2014_8483/chesapeake_bay/ncei19_n39x75_w076x25_2019v1.tif,/pscratch/sd/s/sbrus/Susquehanna_watershed_DEM/data/raw/cudem19/ncei19_n39x75_w076x25_2019v1.tif,,cudem19,,
