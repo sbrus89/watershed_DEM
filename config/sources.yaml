@@ -101,6 +101,12 @@ sources:
     #                    MD lower Eastern Shore (Nanticoke, Wicomico, Tangier
     #                    Sound, Crisfield) + some VA_ channel areas
     #   CENAP:           16 in bbox, 0 in polygon -- excluded.
+    # Those counts UNDERSTATE: the bbox research query hit a server page
+    # limit (CENAB returned exactly 500). Stage 03's own district-wide query
+    # found 1253 basin-intersecting surveys (test slice, 2026-11-13).
+    # Known skip: CENAO_DIS_NR_01_NAN_20190429_CS (Nansemond) -- 2 spurious
+    # above-MLLW points (-22.1, -4.2 ft) among 6583 sane soundings trip
+    # ImplausibleDepthsError; CUDEM fallback accepted (user, 2026-11-13).
     district: [CENAO, CENAB]
     dir: data/raw/ehydro
     grid_dir: data/intermediate/ehydro_grids
