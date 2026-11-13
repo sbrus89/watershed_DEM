@@ -54,6 +54,23 @@ def test_plausibility_gate_catches_missed_conversion():
         eh.check_plausible(np.array([13.7, 6.1]), "sign_flipped")
 
 
+def test_plausible_min_override_deepens_only_the_floor():
+    """East River surveys reach -37.2 m at Throgs Neck (CUDEM agrees), below
+    the -35 m default floor. A per-survey `plausible_min_m` override must
+    admit them -- and must not become a back door: it cannot raise the
+    floor, touch the +5 m ceiling, or switch the gate off with a typo."""
+    deep = np.array([-37.2, -12.0, -1.0])
+    with raises(eh.ImplausibleDepthsError):
+        eh.check_plausible(deep, "er_default")            # default rejects
+    eh.check_plausible(deep, "er_override", floor=-40.0)  # override admits
+    with raises(eh.ImplausibleDepthsError):               # ceiling unchanged
+        eh.check_plausible(np.array([-37.2, 6.1]), "flip", floor=-40.0)
+    with raises(ValueError):                               # typo: -400
+        eh.check_plausible(deep, "typo", floor=-400.0)
+    with raises(ValueError):                               # cannot tighten
+        eh.check_plausible(deep, "tight", floor=-10.0)
+
+
 def test_read_survey_points_xyz(tmp_path):
     sdir = tmp_path / "survey"
     sdir.mkdir()
