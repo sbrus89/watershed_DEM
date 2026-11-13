@@ -105,6 +105,40 @@ def test_mllw_to_navd88_applies_separation(tmp_path):
     assert np.allclose(out[:, :2], xyz[:, :2])  # horizontal untouched
 
 
+def test_survey_wholly_outside_separation_raster_is_rejected(tmp_path):
+    """Delaware bug: 156 surveys south of vdatum.sample_bounds got
+    np.nanmedian([nan, ...]) == nan as their fallback separation, came out
+    all-NaN, and were gridded as empty tifs with no error. Every point
+    outside the raster must raise, not return NaN elevations."""
+    importorskip("rasterio")
+    from rasterio.transform import from_origin
+
+    # separation raster covers lon -76..-74, lat 38.5..40.5 ...
+    sep = make_geotiff(tmp_path / "sep.tif", np.full((20, 20), -0.7),
+                       from_origin(-76.0, 40.5, 0.1, 0.1), "EPSG:4269")
+    # ... survey sits at ~(-75.4E, 38.1N), south of it
+    xyz = np.array([[465000.0, 4217000.0, -3.0],
+                    [465050.0, 4217050.0, -4.0]])
+    with raises(eh.SeparationUndefinedError):
+        eh.mllw_to_navd88(xyz, "EPSG:26918", sep)
+
+    # partial coverage keeps the documented survey-median fallback
+    inside = np.array([[456000.0, 4372000.0, -1.0]])
+    out = eh.mllw_to_navd88(np.vstack([inside, xyz]), "EPSG:26918", sep)
+    assert np.allclose(out[:, 2], [-1.7, -3.7, -4.7])
+
+
+def test_plausibility_gate_rejects_nan_elevations():
+    """NaN defeats `zmin < MIN or zmax > MAX` (both False), so the range
+    check alone let all-NaN surveys through as 'plausible'."""
+    with raises(eh.ImplausibleDepthsError):
+        eh.check_plausible(np.array([np.nan, np.nan]), "all_nan")
+    with raises(eh.ImplausibleDepthsError):
+        eh.check_plausible(np.array([-5.0, np.nan]), "one_nan")
+    with raises(eh.ImplausibleDepthsError):
+        eh.check_plausible(np.array([]), "empty")
+
+
 def test_grid_survey_pins_absolute_coordinates(tmp_path):
     """TIN gridding on an x+y-sloped plane, checked at known world points.
 
