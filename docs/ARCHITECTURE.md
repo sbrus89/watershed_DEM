@@ -110,6 +110,7 @@ URLs/priorities/flags from there, never inline.
 | # | Source | Details |
 |---|---|---|
 | 1 | **USACE eHydro (CENAP)** | Navigation-channel multibeam, 2022–2025. AGOL FeatureServer query (`usacedistrictcode='CENAP'`) → ZIP per survey (GDB SurveyPoint/outline or XYZ text). **MLLW, feet, positive-down** → converted (see §5), TIN-gridded at 3 m UTM 18N, clipped to survey hull. Newest survey wins where overlapping. |
+| 1b | **`nos_grids` — pre-converted NAVD88 survey rasters** (optional, added 2026-11-13) | Explicit list in `sources.nos_grids.items` (`url`, `bbox` [W,S,E,N], `name`); basins that omit the source are unaffected (compositor/stage 05 skip unconfigured sources). First use: Hudson (0202/0203) — nine NOAA multibeam surveys 2015–18 (H12872/3/4, F00658, H13022/3, H13092, D00211, H13138), 0.5 m GeoTIFF zips that NYSDEC converted ellipsoid→**NAVD88 m, positive up** and hosts (index: DEC "Benthic_Data_Footprints" FeatureServer). No conversion of ours, so stage 05 checks every raster: values inside `plausible_range_m` **and a negative median** (a positive-down shallow survey passes a range check alone). Ranked below eHydro (newer channel surveys), above CUDEM. Fills the Newburgh→Troy reach that has no CUDEM or BlueTopo. Provenance id 15. |
 | 2 | **USGS EAARL-B Upper Delaware topobathy v1** (DOI 10.5066/P97031JU) | Green-lidar channel bathymetry, Hancock NY → Portland PA only. Ships **lidar-void polygons** (deep/turbid pools) which must be excluded from the water mask. Discovered via ScienceBase DOI walk. |
 | 3 | **NOAA CUDEM 1/9″** (dataset 8483) | Delaware Bay → ~Trenton, mostly 2014/2018 vintage. S3 `noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NCEI_ninth_Topobathy_2014_8483/{northeast_sandy,chesapeake_bay}/`; tile index + urllist at `coast.noaa.gov/htdata/raster2/elevation/NCEI_ninth_Topobathy_2014_8483/`. Doubles as the grid template (§2). |
 | 4 | **NJ/DE CoNED 1 m topobathy (2015)** | `coned.enabled: false` by default (95 GB, sources 1888–2014, footprint stops at 41.2°N). Backstop only if QA shows water gaps. The user explicitly evaluated and rejected CoNED as a primary source. |
@@ -183,7 +184,7 @@ stack actually has data.
 - `data/intermediate/tiles/<name>.tif` — float32 elevation, deflate, tiled.
 - `data/intermediate/tiles/<name>_source.tif` — uint8 **provenance raster**
   (`compositing.source_ids` in config: s1m=1, dem1m=2, dem13=3, ehydro=11,
-  eaarlb=12, cudem19=13, coned=14, filled=99, nodata=0). In the feather band
+  eaarlb=12, cudem19=13, coned=14, nos_grids=15, filled=99, nodata=0). In the feather band
   the id is whichever side has alpha ≥ 0.5. Residual interior holes are
   filled with `rasterio.fill.fillnodata` (max 50 px) and flagged `filled`.
 - Stage 09 converts to COG with the final `dewatershed19_*` name.

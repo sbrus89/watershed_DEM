@@ -21,8 +21,12 @@ def test_stacks_match_config_roles_and_priorities():
                   if c["role"] == "land")
     water = sorted((c["priority"], n) for n, c in cfg["sources"].items()
                    if c["role"] == "water")
-    assert [n for _, n in land] == LAND_SOURCES
-    assert [n for _, n in water] == WATER_SOURCES
+    # a basin may leave optional sources (nos_grids) out entirely; those it
+    # does configure must still follow the code's stack order
+    assert [n for _, n in land] == [s for s in LAND_SOURCES
+                                    if s in cfg["sources"]]
+    assert [n for _, n in water] == [s for s in WATER_SOURCES
+                                     if s in cfg["sources"]]
 
 
 def test_every_source_has_dir_and_valid_resampling():

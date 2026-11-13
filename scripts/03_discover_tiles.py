@@ -254,6 +254,37 @@ def coned_rows(cfg, basin_geom) -> list[dict]:
     return rows
 
 
+def nos_grids_rows(cfg) -> list[dict]:
+    """Manifest rows for explicitly listed NAVD88 survey rasters.
+
+    Each `sources.nos_grids.items` entry gives a download URL and its
+    lon/lat bbox; the bbox lets stage 04/05 --tile filtering skip the
+    multi-GB archives a single-tile test slice does not touch.
+    """
+    scfg = cfg["sources"].get("nos_grids")
+    if not scfg or not scfg.get("enabled", True):
+        return []
+    dest = dp.path(scfg["dir"])
+    pw, ps, pe, pn = cfg["project"]["bbox"]
+    rows = []
+    for it in scfg["items"]:
+        w, s, e, n = it["bbox"]
+        # must be a real box inside the project's coarse bbox: a [S, W, N, E]
+        # slip still has w<e and s<n but lands nowhere near the basin, and
+        # would silently drop the survey from every tile
+        if not (w < e and s < n and w < pe and e > pw and s < pn and n > ps):
+            raise ValueError(f"nos_grids item {it['url']}: bbox {it['bbox']} "
+                             f"is not [W, S, E, N] inside project bbox "
+                             f"{cfg['project']['bbox']}")
+        rows.append({"url": it["url"],
+                     "dest": str(dest / it["url"].rsplit("/", 1)[1]),
+                     "size": "", "source": "nos_grids",
+                     "tile": it.get("name", ""),
+                     "bbox": f"{w} {s} {e} {n}"})
+    log.info("nos_grids: %d survey rasters", len(rows))
+    return rows
+
+
 def _resolve_doi_to_item(doi: str) -> str | None:
     """ScienceBase item id behind a DOI, via the doi.org redirect."""
     import requests
@@ -400,6 +431,7 @@ def main() -> None:
     # --- water stack + masks ---------------------------------------------
     rows += ehydro_rows(cfg, basin_geom)
     rows += eaarlb_rows(cfg, basin_geom)
+    rows += nos_grids_rows(cfg)
     nhd_url = cfg["nhdplushr"]["url"]
     rows.append({"url": nhd_url,
                  "dest": str(dp.path("data", "raw", "nhdplushr",

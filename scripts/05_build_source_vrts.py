@@ -15,7 +15,49 @@ import dem_pipeline as dp
 
 log = logging.getLogger("05_build_source_vrts")
 
-SOURCES = ["s1m", "dem1m_projects", "dem13", "cudem19", "eaarlb", "coned"]
+SOURCES = ["s1m", "dem1m_projects", "dem13", "cudem19", "eaarlb", "coned",
+           "nos_grids"]
+
+# Whole-raster sanity window for sources that arrive ALREADY in NAVD88 metres
+# (no conversion of ours to catch a units/sign slip, unlike eHydro's
+# ImplausibleDepthsError). Checked per input file from its own statistics.
+NAVD88_CHECKED_SOURCES = {"nos_grids"}
+
+
+class ImplausibleRasterError(SystemExit):
+    """A NAVD88 water raster's values are inconsistent with bathymetry in
+    metres, positive up -- e.g. depths stored positive-down, or feet."""
+
+
+def check_navd88_water_raster(path, lo: float, hi: float) -> None:
+    """Fail loudly unless `path` looks like NAVD88 metres, positive up.
+
+    Uses the smallest overview for speed (the 0.5 m Hudson surveys are
+    multi-GB): the range must sit inside [lo, hi], and the median must be
+    below 0 -- a positive-down survey has a positive median, which a range
+    check alone would accept for shallow water.
+    """
+    import numpy as np
+    import rasterio
+
+    with rasterio.open(path) as src:
+        if src.crs is None:
+            raise ImplausibleRasterError(f"{path}: no CRS -- cannot place it")
+        ovr = src.overviews(1)
+        shape = (src.height // ovr[-1], src.width // ovr[-1]) if ovr else None
+        a = src.read(1, out_shape=shape, masked=True).astype("f8")
+    v = a.compressed()
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        raise ImplausibleRasterError(f"{path}: no valid pixels")
+    zmin, zmax, zmed = float(v.min()), float(v.max()), float(np.median(v))
+    if zmin < lo or zmax > hi or not zmed < 0.0:
+        raise ImplausibleRasterError(
+            f"{path}: values [{zmin:.2f}, {zmax:.2f}] median {zmed:.2f} m are "
+            f"not NAVD88 bathymetry in metres, positive up (expected within "
+            f"[{lo}, {hi}] with a negative median) -- check units/sign")
+    log.info("%s: NAVD88 check ok, [%.2f, %.2f] median %.2f m",
+             Path(path).name, zmin, zmax, zmed)
 
 
 def extract_archives(raw_dir) -> int:
@@ -141,8 +183,8 @@ def main() -> None:
         nominal_extent(args.tile) if args.tile else None)
 
     for name in SOURCES:
-        scfg = cfg["sources"][name]
-        if not scfg.get("enabled", True):
+        scfg = cfg["sources"].get(name)
+        if scfg is None or not scfg.get("enabled", True):
             continue
         raw = dp.path(scfg["dir"])
         if raw.exists():
@@ -161,6 +203,10 @@ def main() -> None:
                     "(check for .part files); rerun stage 04 before this one")
             log.info("%s: downloads complete but no rasters, skipping", name)
             continue
+        if name in NAVD88_CHECKED_SOURCES:
+            lo, hi = scfg["plausible_range_m"]
+            for t in tifs:
+                check_navd88_water_raster(t, lo, hi)
         build_vrt(name, tifs, vrt_dir)
 
 
