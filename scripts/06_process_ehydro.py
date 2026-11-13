@@ -51,6 +51,15 @@ class ImplausibleDepthsError(ValueError):
     always a units/sign/datum mistake. Aborts the run (never skipped)."""
 
 
+class SeparationUndefinedError(ValueError):
+    """No survey point falls inside the MLLW->NAVD88 separation raster, so
+    the survey cannot be converted. Raised instead of letting an all-NaN
+    survey through: np.nanmedian of an all-NaN array is NaN, and NaN
+    elevations defeat every comparison in check_plausible(). Before this
+    existed, 156 of Delaware's 1013 surveys were silently gridded as
+    0%-valid tifs. Fix by widening vdatum.sample_bounds over the survey."""
+
+
 def convert_raw_depths(z_raw, units: str, positive_down: bool):
     """Raw survey soundings -> MLLW-referenced elevations in meters.
 
@@ -64,6 +73,12 @@ def convert_raw_depths(z_raw, units: str, positive_down: bool):
 
 
 def check_plausible(z_navd88, survey: str) -> None:
+    z_navd88 = np.asarray(z_navd88, dtype="f8")
+    if z_navd88.size == 0 or not np.isfinite(z_navd88).all():
+        n_bad = int((~np.isfinite(z_navd88)).sum())
+        raise ImplausibleDepthsError(
+            f"{survey}: {n_bad} of {z_navd88.size} converted elevations are "
+            "non-finite (NaN comparisons would pass the range check)")
     zmin, zmax = float(np.min(z_navd88)), float(np.max(z_navd88))
     if zmin < PLAUSIBLE_MIN or zmax > PLAUSIBLE_MAX:
         raise ImplausibleDepthsError(
@@ -181,7 +196,17 @@ def mllw_to_navd88(xyz: np.ndarray, crs, sep_path: Path) -> np.ndarray:
     with rasterio.open(sep_path) as sep:
         tr = Transformer.from_crs(crs, sep.crs, always_xy=True)
         lon, lat = tr.transform(xyz[:, 0], xyz[:, 1])
-        vals = np.array([v[0] for v in sep.sample(np.column_stack([lon, lat]))])
+        # masked=True so off-raster points read as undefined whatever the
+        # raster's nodata convention (unmasked, an off-raster sample returns
+        # the nodata value -- or 0 if none is set -- and would be ADDED to z)
+        vals = np.array([np.ma.filled(v.astype("f8"), np.nan)[0] for v in
+                         sep.sample(np.column_stack([lon, lat]), masked=True)])
+    if not np.isfinite(vals).any():
+        raise SeparationUndefinedError(
+            f"all {len(vals)} points lie outside the separation raster "
+            f"{sep_path.name} (lon {np.min(lon):.3f}..{np.max(lon):.3f}, "
+            f"lat {np.min(lat):.3f}..{np.max(lat):.3f}); widen "
+            "vdatum.sample_bounds to cover this survey")
     if not np.isfinite(vals).all():
         n_bad = int((~np.isfinite(vals)).sum())
         med = np.nanmedian(vals)
@@ -358,6 +383,13 @@ def main() -> None:
             log.error("%s: SKIPPED, implausible depths (%s) -- inspect and "
                       "add an override or rerun --survey %s after fixing",
                       zpath.stem, e, zpath.stem)
+        except SeparationUndefinedError as e:
+            # Same posture as ImplausibleDepthsError: skip this survey loudly
+            # (CUDEM covers the reach) rather than abort the basin -- but never
+            # grid it, since an all-NaN grid is indistinguishable downstream
+            # from a survey that was deliberately dropped.
+            log.error("%s: SKIPPED, no MLLW->NAVD88 separation (%s)",
+                      zpath.stem, e)
         except Exception as e:
             log.error("%s: FAILED (%s) -- continuing; rerun after fixing",
                       zpath.stem, e)
