@@ -1,0 +1,9 @@
+# Per-survey exceptions to sources.ehydro defaults (feet, positive down, MLLW).
+# Every entry must cite the evidence that justified it.
+
+JR_04_DPC_20140722_CS:
+  # James River channel, CENAO. Soundings are stored positive-UP (raw median
+  # -25.1 ft) while its same-footprint siblings 20140220 and 20140826 are
+  # positive-down (+25.4 / +25.7 ft). Flipped, it agrees with CUDEM to a
+  # median of -0.13 m (as-is: +15.3 m). Verified 2026-11-13.
+  depth_positive_down: false
