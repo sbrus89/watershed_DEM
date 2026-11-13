@@ -25,7 +25,13 @@ from .grid import GridSpec, output_filename
 log = logging.getLogger(__name__)
 
 LAND_SOURCES = ["s1m", "dem1m_projects", "dem13"]
-WATER_SOURCES = ["ehydro", "eaarlb", "cudem19", "coned"]
+# Priority order (first valid wins, feathered at footprint edges).
+# nos_grids -- NAVD88 survey rasters listed explicitly in config, e.g. NOAA
+# multibeam surveys of the tidal Hudson -- outranks the older CUDEM
+# compilation but yields to eHydro, whose channel surveys are newer still.
+# Sources a basin does not configure at all are skipped, so adding one here
+# never requires touching every basin's sources.yaml.
+WATER_SOURCES = ["ehydro", "nos_grids", "eaarlb", "cudem19", "coned"]
 
 _RESAMPLING = {"near": "nearest", "average": "average", "bilinear": "bilinear"}
 
@@ -249,8 +255,8 @@ def compose_tile(name: str, out_dir: Path | None = None) -> Path:
     def warp_stack(source_names: list[str]) -> dict[str, np.ndarray]:
         arrays = {}
         for s in source_names:
-            scfg = cfg["sources"][s]
-            if not scfg.get("enabled", True):
+            scfg = cfg["sources"].get(s)
+            if scfg is None or not scfg.get("enabled", True):
                 continue
             vrt = source_vrt(s)
             if vrt is None:
