@@ -153,3 +153,75 @@ def test_data_tiles_outside_the_basin_are_skipped_but_metadata_is_kept(
     # and no basin at all means no spatial filtering (back-compatible)
     rows = disc.eaarlb_rows(_cfg(tmp_path, sciencebase_item=ITEM))
     assert len(rows) == 3
+
+
+# ---- eHydro district selection ---------------------------------------------
+
+def _ehydro_cfg(tmp_path, district):
+    return {"sources": {"ehydro": {
+        "feature_server": "https://fs/query", "district": district,
+        "dir": str(tmp_path / "ehydro")}}}
+
+
+def _ehydro_fake_get(calls, by_district):
+    """FeatureServer stub that honours the `where` clause's district list."""
+    def get(url, params=None, timeout=None):
+        calls.append(dict(params or {}))
+        where = params["where"]
+        feats = [f for d, fs in by_district.items() if f"'{d}'" in where
+                 for f in fs] if params["resultOffset"] == 0 else []
+        return _Resp({"type": "FeatureCollection", "features": feats})
+    return get
+
+
+def _survey(name, x):
+    return {"type": "Feature",
+            "properties": {"sourcedatalocation": f"https://e/{name}.zip",
+                           "surveydateend": 1700000000000},
+            "geometry": {"type": "Point", "coordinates": [x, 37.5]}}
+
+
+def test_ehydro_list_of_districts_fetches_surveys_from_every_district(
+        tmp_path, monkeypatch):
+    """A basin straddling two USACE districts (0208: CENAO + CENAB) must get
+    both districts' surveys. The old f-string `usacedistrictcode='{district}'`
+    turned a YAML list into `='['CENAO', 'CENAB']'`, which matches nothing --
+    an empty survey set that looks like a district with no data."""
+    importorskip("shapely")
+    from shapely.geometry import box
+    import requests
+    calls = []
+    monkeypatch.setattr(requests, "get", _ehydro_fake_get(calls, {
+        "CENAO": [_survey("norfolk", -76.3)],
+        "CENAB": [_survey("baltimore", -75.9)],
+        "CENAP": [_survey("philly", -75.8)],      # not configured
+    }))
+    rows = disc.ehydro_rows(_ehydro_cfg(tmp_path, ["CENAO", "CENAB"]),
+                            box(-77, 37, -75, 38))
+    assert sorted(Path(r["dest"]).name for r in rows) == \
+        ["baltimore.zip", "norfolk.zip"]
+
+
+def test_ehydro_single_district_string_still_works(tmp_path, monkeypatch):
+    """Every existing basin config uses a plain string -- it must not be
+    iterated character by character into ('C','E','N','A','B')."""
+    importorskip("shapely")
+    from shapely.geometry import box
+    import requests
+    calls = []
+    monkeypatch.setattr(requests, "get", _ehydro_fake_get(calls, {
+        "CENAB": [_survey("baltimore", -75.9)],
+        "CENAO": [_survey("norfolk", -76.3)]}))
+    rows = disc.ehydro_rows(_ehydro_cfg(tmp_path, "CENAB"),
+                            box(-77, 37, -75, 38))
+    assert [Path(r["dest"]).name for r in rows] == ["baltimore.zip"]
+    assert calls[0]["where"] == "usacedistrictcode IN ('CENAB')"
+
+
+def test_ehydro_district_rejects_empty_and_malformed_codes():
+    """An empty list would query nothing; a stray quote would break (or
+    widen) the SQL. Both must fail loudly, not return zero surveys."""
+    with raises(ValueError):
+        disc._ehydro_district_where([])
+    with raises(ValueError):
+        disc._ehydro_district_where("CENAB' OR '1'='1")
