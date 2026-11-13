@@ -7,11 +7,12 @@
 # all the way up to the Federal Dam at Troy (VDatum returns MLLW-NAVD88
 # separations from Newburgh to the Troy lock; -999999 on the Mohawk).
 #
-# KNOWN LIMITATION: CUDEM 1/9" (NCEI 8483) stops at ~41.5N (Newburgh) -- only
-# 2 tiles touch this basin. No NOAA DEM (CUDEM 1/9", 1/3", Digital Coast)
-# covers the ~140 km tidal Hudson from Newburgh to Troy (checked 2026-11-13).
-# There the only bathymetry is the 29 CENAN channel surveys; elsewhere in the
-# river the composite keeps the S1M lidar water SURFACE (flat), not a bed.
+# BATHYMETRY GAP AND HOW IT IS FILLED: CUDEM 1/9" (NCEI 8483) and NOAA
+# BlueTopo both stop at ~41.5N (Newburgh) -- only 2 CUDEM tiles touch this
+# basin. The ~140 km tidal Hudson from Newburgh to Troy is covered instead by
+# sources.nos_grids: NOAA 2015-18 multibeam surveys, converted to NAVD88 and
+# hosted by NYSDEC (added 2026-11-13 at the user's request). Shallow flats
+# outside the multibeam footprints still fall back to the S1M water surface.
 #
 # All vertical datums are NAVD88 meters unless noted. All endpoints verified
 # live 2026-11-13.
@@ -102,9 +103,45 @@ sources:
     depth_positive_down: true
     vertical_ref: MLLW
     resampling: bilinear
-  eaarlb:
+  nos_grids:
     role: water
     priority: 2
+    # NOAA multibeam hydrographic surveys of the tidal Hudson (2015-2018),
+    # 0.5 m GeoTIFFs that NYSDEC converted from the BAG ellipsoid heights to
+    # NAVD88 m, positive up (VDatum, NAD83(2011) frame), and hosts for the
+    # Hudson River Estuary Program. Index: DEC "Benthic_Data_Footprints"
+    # FeatureServer (services6.arcgis.com/DZHaqZm9cxOD4CWM). Found 2026-11-13
+    # after CUDEM 1/9" and BlueTopo both proved to stop at ~41.55N; verified
+    # H12874: NAD83/UTM 18N, nodata set, values -20.8..-0.9 m. Listed: every
+    # survey whose footprint intersects the 0202 polygon.
+    # Stage 05 refuses any raster outside plausible_range_m or with a
+    # non-negative median. Floor: the Hudson's deepest hole (World's End, by
+    # West Point) is charted around 200 ft (~61 m); the 1-m contour product
+    # bottoms out at -54 m. -70 leaves margin without admitting feet.
+    # DEC's conversion probably used GEOID12B (pipeline: GEOID18); the
+    # offset vs our converted eHydro is measured on the test slice.
+    dir: data/raw/nos_grids
+    resampling: average
+    plausible_range_m: [-70.0, 5.0]
+    items:
+    - name: F00658   # Kingston to Castleton  2015; 100% of footprint in 0202; 194 MB zip
+      url: "https://www.dec.ny.gov/fs/data/HREP/f658_nvd88.zip"
+      bbox: [-73.962, 41.9435, -73.7554, 42.5403]
+    - name: H13022   # Haverstraw Bay to Danskammer Pt  2017; 67% of footprint in 0202; 583 MB zip
+      url: "https://www.dec.ny.gov/fs/data/HREP/h3022_nvd88.zip"
+      bbox: [-74.0112, 41.2099, -73.9368, 41.579]
+    - name: H12872   # City of Hudson to Troy  2016; 100% of footprint in 0202; 193 MB zip
+      url: "https://www.dec.ny.gov/fs/data/HREP/h872_nvd88.zip"
+      bbox: [-73.8438, 42.2338, -73.6852, 42.7499]
+    - name: H12873   # Kingston to Catskill  2016; 100% of footprint in 0202; 324 MB zip
+      url: "https://www.dec.ny.gov/fs/data/HREP/h873_nvd88.zip"
+      bbox: [-73.9644, 41.9296, -73.8415, 42.2359]
+    - name: H12874   # Danskammer Pt to Kingston  2016; 100% of footprint in 0202; 489 MB zip
+      url: "https://www.dec.ny.gov/fs/data/HREP/h874_nvd88.zip"
+      bbox: [-73.9777, 41.5728, -73.9333, 41.9313]
+  eaarlb:
+    role: water
+    priority: 3
     # Delaware-specific dataset (Hancock NY -> Portland PA lidar bathymetry);
     # kept configured only because dem_pipeline.composite.WATER_SOURCES is a
     # code-level list that always includes "eaarlb" (compose_tile looks it up
@@ -116,11 +153,11 @@ sources:
     resampling: average
   cudem19:
     role: water
-    priority: 3
+    priority: 4
     # Same NCEI ninth-arcsecond dataset (8483). Confirmed live 2026-11-13
     # (urllist8483.txt): only 2 tiles touch the buffered basin, both under
     # northeast_sandy (n41x50_w074x00, n41x50_w074x25: Newburgh-West Point).
-    # Nothing north of 41.5N -- see the KNOWN LIMITATION in the header.
+    # Nothing north of 41.5N -- see nos_grids above and the file header.
     s3_prefixes:
       - "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NCEI_ninth_Topobathy_2014_8483/northeast_sandy/"
     bulk_index: "https://coast.noaa.gov/htdata/raster2/elevation/NCEI_ninth_Topobathy_2014_8483/"
@@ -130,7 +167,7 @@ sources:
     resampling: near   # already on the target grid
   coned:
     role: water
-    priority: 4
+    priority: 5
     # NJ/DE-specific collection -- nowhere near this basin. Left disabled.
     enabled: false
     bulk_index: "https://coast.noaa.gov/htdata/raster2/elevation/NewJersey_Delaware_Coned_Topobathy_DEM_2015_5040/"
@@ -198,6 +235,7 @@ compositing:
     eaarlb: 12
     cudem19: 13
     coned: 14
+    nos_grids: 15
     filled: 99
 
 output:
