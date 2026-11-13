@@ -108,15 +108,33 @@ def dem13_rows(gap_geom, cfg) -> list[dict]:
     return rows
 
 
+def _ehydro_district_where(district) -> str:
+    """FeatureServer `where` clause for one district code or a list of them.
+
+    A basin can straddle USACE district boundaries (HUC-4 0208 Lower
+    Chesapeake: CENAO Norfolk *and* CENAB Baltimore surveys inside the
+    polygon), so `sources.ehydro.district` may be a string or a list.
+    Codes are validated rather than escaped: they are always 5 letters.
+    """
+    codes = [district] if isinstance(district, str) else list(district)
+    if not codes:
+        raise ValueError("sources.ehydro.district is empty")
+    for c in codes:
+        if not (isinstance(c, str) and c.isalpha() and c.isupper()):
+            raise ValueError(f"implausible USACE district code: {c!r}")
+    return "usacedistrictcode IN (" + ",".join(f"'{c}'" for c in codes) + ")"
+
+
 def ehydro_rows(cfg, basin_geom) -> list[dict]:
     import requests
 
     scfg = cfg["sources"]["ehydro"]
     dest = dp.path(scfg["dir"])
+    where = _ehydro_district_where(scfg["district"])
     rows, offset = [], 0
     while True:
         params = {
-            "where": f"usacedistrictcode='{scfg['district']}'",
+            "where": where,
             "outFields": "surveyjobidpk,sdsid,surveytype,channelareaidfk,"
                          "dateuploaded,surveydatestart,surveydateend,"
                          "sourcedatalocation",
