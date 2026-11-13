@@ -72,7 +72,22 @@ def convert_raw_depths(z_raw, units: str, positive_down: bool):
     return -z if positive_down else z
 
 
-def check_plausible(z_navd88, survey: str) -> None:
+# Deepest per-survey floor an override may set (m NAVD88). Overrides exist
+# for real deep holes (East River at Throgs Neck reaches -37 m, verified
+# against CUDEM); this cap keeps a typo from disabling the gate entirely.
+OVERRIDE_FLOOR_LIMIT = -100.0
+
+
+def check_plausible(z_navd88, survey: str, floor: float | None = None) -> None:
+    """Raise ImplausibleDepthsError unless every z is finite and inside the
+    window. `floor` (from a survey's `plausible_min_m` override) may only
+    DEEPEN the lower bound, never raise it or touch the ceiling."""
+    if floor is None:
+        floor = PLAUSIBLE_MIN
+    if not (OVERRIDE_FLOOR_LIMIT <= floor <= PLAUSIBLE_MIN):
+        raise ValueError(
+            f"{survey}: plausible_min_m override {floor} must lie in "
+            f"[{OVERRIDE_FLOOR_LIMIT}, {PLAUSIBLE_MIN}]")
     z_navd88 = np.asarray(z_navd88, dtype="f8")
     if z_navd88.size == 0 or not np.isfinite(z_navd88).all():
         n_bad = int((~np.isfinite(z_navd88)).sum())
@@ -80,10 +95,10 @@ def check_plausible(z_navd88, survey: str) -> None:
             f"{survey}: {n_bad} of {z_navd88.size} converted elevations are "
             "non-finite (NaN comparisons would pass the range check)")
     zmin, zmax = float(np.min(z_navd88)), float(np.max(z_navd88))
-    if zmin < PLAUSIBLE_MIN or zmax > PLAUSIBLE_MAX:
+    if zmin < floor or zmax > PLAUSIBLE_MAX:
         raise ImplausibleDepthsError(
             f"{survey}: z range [{zmin:.1f}, {zmax:.1f}] m NAVD88 outside "
-            f"[{PLAUSIBLE_MIN}, {PLAUSIBLE_MAX}] -- check units/sign; "
+            f"[{floor}, {PLAUSIBLE_MAX}] -- check units/sign; "
             f"add an override for {survey} if intentional")
 
 
@@ -362,7 +377,8 @@ def main() -> None:
             xyz = mllw_to_navd88(xyz, crs, sep_path)
             log.info("%s: %d pts, NAVD88 z range [%.2f, %.2f] m",
                      zpath.stem, len(xyz), xyz[:, 2].min(), xyz[:, 2].max())
-            check_plausible(xyz[:, 2], zpath.stem)
+            check_plausible(xyz[:, 2], zpath.stem,
+                            floor=ov.get("plausible_min_m"))
 
             grid_survey(xyz, crs, outline, out_tif, scfg["grid_res_m"], nodata)
 
