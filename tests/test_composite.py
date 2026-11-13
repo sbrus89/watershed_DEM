@@ -579,6 +579,65 @@ def test_compose_tile_vector_water_mask_and_voids(tmp_path, monkeypatch):
     assert np.all(ids[:, 74] == 1)
 
 
+def test_water_stack_order_ehydro_then_nos_grids_then_cudem(tmp_path, monkeypatch):
+    """nos_grids (2015-18 NOAA multibeam of the Hudson) must outrank the 2014
+    CUDEM compilation but yield to newer eHydro channel surveys. Getting the
+    order wrong silently keeps the stale grid wherever they overlap. (Every
+    other compose test's config omits nos_grids entirely, which also pins
+    that an unconfigured source is skipped rather than raising KeyError.)"""
+    importorskip("scipy")
+    rasterio = importorskip("rasterio")
+    from rasterio.transform import Affine
+
+    import dem_pipeline.composite as composite
+    import dem_pipeline.grid as grid_mod
+    from dem_pipeline.grid import GridSpec
+
+    (tmp_path / "config").mkdir()
+    vdir = tmp_path / "data" / "intermediate" / "vrt"
+    vdir.mkdir(parents=True)
+    GridSpec(epsg=4269, nodata=NODATA, collar_px=0,
+             cudem_geotransforms={TILE: GT}, cudem_sizes={TILE: [90, 90]},
+             ).dump(tmp_path / "config" / "tile_grid.json")
+
+    def fake_repo_path(*parts):
+        return tmp_path.joinpath(*parts)
+
+    cfg = _test_cfg(tmp_path)
+    cfg["sources"]["nos_grids"] = {"resampling": "near"}
+    cfg["compositing"]["source_ids"]["nos_grids"] = 15
+    monkeypatch.setattr(grid_mod, "repo_path", fake_repo_path)
+    monkeypatch.setattr(composite, "repo_path", fake_repo_path)
+    monkeypatch.setattr(composite, "load_config", lambda: cfg)
+
+    # rasters extend fill_max_px (10) past the tile so the compositor's
+    # padded window does not see a fixture edge as a footprint edge
+    pad, n = 10, 110
+    t = Affine.from_gdal(GT[0] - pad * PX, PX, 0.0, 40.0 + pad * PX, 0.0, -PX)
+    c = lambda a, b: slice(a + pad, b + pad)      # tile cols -> raster cols
+    land = np.full((n, n), 10.0, "f4")
+    land[:, c(20, 70)] = NODATA                   # wide river
+    cudem = np.full((n, n), NODATA, "f4")
+    cudem[:, c(20, 70)] = -5.0                    # whole river
+    nos = np.full((n, n), NODATA, "f4")
+    nos[:, c(32, 58)] = -8.0                      # most of the river
+    eh = np.full((n, n), NODATA, "f4")
+    eh[:, c(42, 48)] = -12.0                      # the channel only
+    for nm, a in (("s1m", land), ("cudem19", cudem), ("nos_grids", nos),
+                  ("ehydro", eh)):
+        make_geotiff(vdir / f"{nm}.vrt", a, t, "EPSG:4269", nodata=NODATA)
+
+    composite.compose_tile(TILE, out_dir=tmp_path / "out")
+    with rasterio.open(tmp_path / "out" / f"{TILE}.tif") as src:
+        z = src.read(1)
+    with rasterio.open(tmp_path / "out" / f"{TILE}_source.tif") as src:
+        ids = src.read(1)
+
+    assert np.allclose(z[:, 44:46], -12.0) and np.all(ids[:, 44:46] == 11)
+    assert np.allclose(z[:, 36:39], -8.0) and np.all(ids[:, 36:39] == 15)
+    assert np.allclose(z[:, 25:29], -5.0) and np.all(ids[:, 25:29] == 13)
+
+
 def test_compose_tile_no_sources_raises(tmp_path, monkeypatch):
     from unittest import SkipTest
     try:

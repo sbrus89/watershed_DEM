@@ -161,3 +161,51 @@ def test_tile_bounds_ignore_out_of_tile_manifest_rows(tmp_path, monkeypatch):
 
     # no bounds (make all): every manifest row is expected on disk
     assert vrts.missing_downloads()["dem1m_projects"] == 1
+
+
+# ---- NAVD88 sanity check for pre-converted survey rasters (nos_grids) ------
+
+def _utm_raster(tmp_path, name, values, crs="EPSG:26918"):
+    import numpy as np
+    from rasterio.transform import from_origin
+    from tests.util import make_geotiff
+    return make_geotiff(tmp_path / name, np.asarray(values, dtype="f4"),
+                        from_origin(584000.0, 4620000.0, 0.5, 0.5), crs,
+                        nodata=-9999.0)
+
+
+def test_navd88_check_accepts_real_bathymetry(tmp_path):
+    """The Hudson H12874 grid reads -20.8..-0.9 m; that must pass."""
+    from tests.util import importorskip
+    importorskip("rasterio")
+    import numpy as np
+    z = np.linspace(-20.8, -0.9, 400).reshape(20, 20)
+    z[0, 0] = -9999.0                       # nodata must not count as -9999 m
+    vrts.check_navd88_water_raster(_utm_raster(tmp_path, "ok.tif", z), -60, 5)
+
+
+def test_navd88_check_rejects_positive_down_shallow_survey(tmp_path):
+    """A shallow survey stored positive-DOWN (+0.5..+4.5) sits entirely inside
+    the [-60, 5] range, so a range-only check would accept it as 'land-ish
+    bathymetry' and paint the river ABOVE the water surface. The median sign
+    is what catches it."""
+    from tests.util import importorskip, raises
+    importorskip("rasterio")
+    import numpy as np
+    z = np.linspace(0.5, 4.5, 400).reshape(20, 20)
+    with raises(vrts.ImplausibleRasterError):
+        vrts.check_navd88_water_raster(_utm_raster(tmp_path, "pd.tif", z), -60, 5)
+
+
+def test_navd88_check_rejects_feet_and_missing_crs(tmp_path):
+    """Depths in feet overshoot the window (a 54 m hole is -177 ft); a raster
+    with no CRS cannot be placed and must not reach gdalbuildvrt."""
+    from tests.util import importorskip, raises
+    importorskip("rasterio")
+    import numpy as np
+    feet = np.linspace(-177.0, -3.0, 400).reshape(20, 20)
+    with raises(vrts.ImplausibleRasterError):
+        vrts.check_navd88_water_raster(_utm_raster(tmp_path, "ft.tif", feet), -60, 5)
+    with raises(vrts.ImplausibleRasterError):
+        vrts.check_navd88_water_raster(
+            _utm_raster(tmp_path, "nocrs.tif", -np.ones((20, 20)), crs=None), -60, 5)

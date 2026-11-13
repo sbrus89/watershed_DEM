@@ -225,3 +225,36 @@ def test_ehydro_district_rejects_empty_and_malformed_codes():
         disc._ehydro_district_where([])
     with raises(ValueError):
         disc._ehydro_district_where("CENAB' OR '1'='1")
+
+
+# ---- nos_grids: explicitly listed NAVD88 survey rasters ---------------------
+
+def test_nos_grids_rows_carry_bbox_and_respect_enabled(tmp_path):
+    """Rows need a bbox, or stage 04/05 --tile filtering lets every multi-GB
+    Hudson archive through on a one-tile test slice. Basins that never
+    configure the source (all of 0204-0208) must yield nothing, not crash."""
+    item = {"url": "https://x/fs/data/HREP/h874_nvd88.zip", "name": "H12874",
+            "bbox": [-73.978, 41.573, -73.933, 41.931]}
+    cfg = {"project": {"bbox": [-75.9, 40.7, -72.6, 44.4]},
+           "sources": {"nos_grids": {"dir": str(tmp_path / "nos"),
+                                     "items": [item]}}}
+    rows = disc.nos_grids_rows(cfg)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["source"] == "nos_grids"
+    assert Path(r["dest"]) == tmp_path / "nos" / "h874_nvd88.zip"
+    assert [float(v) for v in r["bbox"].split()] == item["bbox"]
+
+    cfg["sources"]["nos_grids"]["enabled"] = False
+    assert disc.nos_grids_rows(cfg) == []
+    assert disc.nos_grids_rows({"sources": {}}) == []
+
+
+def test_nos_grids_rejects_a_swapped_bbox(tmp_path):
+    """[S, W, N, E] typed by mistake would intersect nothing and silently
+    drop the survey from every tile."""
+    cfg = {"project": {"bbox": [-75.9, 40.7, -72.6, 44.4]},
+           "sources": {"nos_grids": {"dir": str(tmp_path), "items": [
+        {"url": "https://x/a.zip", "bbox": [41.573, -73.978, 41.931, -73.933]}]}}}
+    with raises(ValueError):
+        disc.nos_grids_rows(cfg)
