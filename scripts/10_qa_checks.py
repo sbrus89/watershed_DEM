@@ -2,7 +2,8 @@
 """Stage 10: QA suite -> data/final/qa/qa_report.json + quicklooks.
 
 Checks: grid conformity (bit-exact vs CUDEM), cross-tile seams, land-overlap
-statistics against CUDEM, per-tile source-mix coverage, hillshade quicklooks.
+statistics against CUDEM, nodata inside the basin polygon, per-tile
+source-mix coverage, hillshade quicklooks.
 Exits nonzero if any hard check fails.
 """
 
@@ -44,6 +45,7 @@ def main() -> None:
         qa.check_grid_conformity(tile_paths),
         qa.check_seams(tile_paths),
         qa.check_cudem_land_overlap(tile_paths),
+        qa.check_basin_nodata(tile_paths),
         qa.coverage_report(tile_paths),
     ]
 

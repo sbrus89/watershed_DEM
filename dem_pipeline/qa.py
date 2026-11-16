@@ -1,8 +1,8 @@
 """QA checks for the final tile set.
 
 Covers: grid conformity (bit-exact vs CUDEM where applicable), cross-tile
-seam continuity, land-overlap statistics against CUDEM, per-tile source mix /
-coverage, and hillshade quicklooks. Each check returns a dict that
+seam continuity, land-overlap statistics against CUDEM, nodata inside the
+basin polygon, per-tile source mix / coverage, and hillshade quicklooks. Each check returns a dict that
 scripts/10_qa_checks.py aggregates into data/final/qa/qa_report.json.
 """
 
@@ -197,6 +197,50 @@ def check_cudem_land_overlap(tile_paths: dict[str, Path]) -> dict:
     return {"check": "cudem_land_overlap",
             "pass": worst <= cfg["qa"]["land_overlap_median_max_m"],
             "worst_abs_median_m": worst, "tiles": stats}
+
+
+def check_basin_nodata(tile_paths: dict[str, Path]) -> dict:
+    """Nodata pixels left INSIDE the HUC-4 polygon.
+
+    The product is only promised inside the basin, so nodata outside it is
+    expected -- but nodata inside means a source was lost or masked and the
+    50-px residual fill could not bridge it. No other check sees that: in
+    0202 (2026-11-16) a 37k-px hole at the Clinton Point quarry (real -84 m
+    floor masked by an over-tight LAND_PLAUSIBLE_MIN) passed every check.
+
+    The polygon is shrunk inward by qa.basin_nodata_edge_buffer_m (default
+    100 m) so source-coverage slivers along the WBD line don't count. Fails
+    when more than qa.basin_nodata_max_px (default 0) such px remain.
+    """
+    import geopandas as gpd
+    import rasterio
+    from rasterio.features import geometry_mask
+
+    cfg = load_config()
+    qcfg = cfg["qa"]
+    buf_m = float(qcfg.get("basin_nodata_edge_buffer_m", 100.0))
+    max_px = int(qcfg.get("basin_nodata_max_px", 0))
+    gpkg = repo_path("data", "intermediate",
+                     f"huc4_{cfg['project']['huc4']}.gpkg")
+    poly = gpd.read_file(gpkg, layer="huc4")
+    if buf_m > 0:
+        poly = poly.to_crs(poly.estimate_utm_crs())
+        poly["geometry"] = poly.buffer(-buf_m)
+    tiles, total = {}, 0
+    for name, p in tile_paths.items():
+        with rasterio.open(p) as src:
+            z = src.read(1)
+            geoms = [g for g in poly.to_crs(src.crs).geometry if not g.is_empty]
+            if not geoms:
+                continue
+            inside = ~geometry_mask(geoms, z.shape, src.transform)
+            n = int((inside & (z == src.nodata)).sum())
+        if n:
+            tiles[name] = n
+            total += n
+    return {"check": "basin_nodata", "pass": total <= max_px,
+            "nodata_px_in_basin": total, "edge_buffer_m": buf_m,
+            "tiles": dict(sorted(tiles.items(), key=lambda kv: -kv[1]))}
 
 
 def coverage_report(tile_paths: dict[str, Path]) -> dict:
