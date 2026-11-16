@@ -298,7 +298,11 @@ files whose manifest bbox intersects the tile). Second suggested slice:
    which must agree exactly) between neighbors; flag > 5 m.
 3. Land-overlap vs CUDEM — |median(ours − CUDEM)| ≤ 0.10 m over land
    (>1 m in both); larger bias ⇒ datum handling error.
-4. Coverage/provenance report per tile; hillshade PNG quicklooks.
+4. Basin nodata — nodata pixels inside the HUC-4 polygon (shrunk inward by
+   `qa.basin_nodata_edge_buffer_m`, default 100 m) must not exceed
+   `qa.basin_nodata_max_px` (default 0). Added 2026-11-16 after a 37k-px
+   quarry hole passed checks 1–3.
+5. Coverage/provenance report per tile; hillshade PNG quicklooks.
 
 ## 7. Package reference
 
@@ -398,6 +402,26 @@ Accepted product limitations (do not "fix" silently):
   be the same registration-drift mechanism despite the mixed source id;
   accepted, but `check_seams` still reports it as `flagged` since the code
   doesn't special-case it.
+- **Window-dependent void fill (0202 `n43x50_w073x25|n43x50_w073x00`,
+  ONE pixel, 5.37 m; accepted by the user 2026-11-16).** Both sides are
+  provenance `filled` inside a ~120-px lidar void crossing the seam. Not
+  the padded-window fill fix failing: recomposing with pad 100 instead of
+  50 gives the identical 5.37 m. The pre-fill inputs in the 12-px overlap
+  differ by exactly one land pixel on the void's edge, valid in one tile's
+  warp and nodata in the other's -- `WarpedVRT` `average` resampling is not
+  perfectly window-invariant (elsewhere in the overlap it shows only as
+  ≤0.06 m). The fill (radius `fill_max_px` = 50) then sees that pixel from
+  one tile only, and the filled value 50 px away differs. Making the warp
+  window-invariant would touch every tile in every basin for one pixel.
+- **Below-sea-level land is real.** `LAND_PLAUSIBLE_MIN` is -200 m plus a
+  2-px halo rule (see `composite.implausible_land_mask`). Until 2026-11-16
+  it was -15 m, which deleted aggregate-quarry pit floors in every basin
+  (Clinton Point NY -84 m, Richmond VA -99 m, King of Prussia PA -73 m,
+  Occoquan, Travilah, Manassas, ...): all outside the water mask, all
+  mapped consistently by S1M and dem13. S1M sentinel-blend corruption
+  (~-300000 m) is still caught by the floor, and its only moderate values
+  are a 1-px partial-blend halo around those pixels (verified on 8
+  Delaware coastal tiles), which the halo rule masks.
 
 Open follow-ups from the adversarial review (unverified-tier, real but not
 gating):

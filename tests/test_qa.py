@@ -232,3 +232,43 @@ def test_coverage_report(tmp_path, monkeypatch):
     res = qa.coverage_report({name: paths[name]})
     row = res["tiles"][name]
     assert row["s1m"] == 50.0 and row["cudem19"] == 50.0
+
+
+def test_basin_nodata_flags_holes_inside_the_polygon_only(tmp_path, monkeypatch):
+    """0202's 37k-px quarry hole sat inside the basin and passed every other
+    check. Nodata inside the (edge-shrunk) HUC-4 polygon must fail; nodata
+    outside it, or in the boundary sliver, must not."""
+    importorskip("geopandas")
+    from rasterio.transform import Affine
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    qa, paths, terrain = _sandbox(tmp_path, monkeypatch)
+    base_cfg = qa.load_config()
+    name = "n40x00_w075x25"
+    gt = TILES[name]
+    # basin = west half of the tile (cols 0-44)
+    (tmp_path / "data" / "intermediate").mkdir(parents=True)
+    gpd.GeoDataFrame(geometry=[box(-75.25, 39.75, -75.125, 40.0)],
+                     crs="EPSG:4269").to_file(
+        tmp_path / "data/intermediate/huc4_9999.gpkg", layer="huc4")
+
+    def run(arr, buf_m):
+        cfg = dict(base_cfg, project={"huc4": "9999"},
+                   qa=dict(base_cfg["qa"], basin_nodata_edge_buffer_m=buf_m))
+        monkeypatch.setattr(qa, "load_config", lambda: cfg)
+        p = make_geotiff(tmp_path / "t" / f"{name}.tif", arr,
+                         Affine.from_gdal(*gt), "EPSG:4269", nodata=NODATA)
+        return qa.check_basin_nodata({name: p})
+
+    z = terrain(gt)
+    inside = z.copy(); inside[40:45, 15:20] = NODATA
+    res = run(inside, 100.0)
+    assert not res["pass"] and res["nodata_px_in_basin"] == 25
+
+    outside = z.copy(); outside[40:45, 60:70] = NODATA
+    assert run(outside, 100.0)["pass"]
+
+    sliver = z.copy(); sliver[10:20, 44] = NODATA   # last column inside
+    assert run(sliver, 1000.0)["pass"]             # within the edge buffer
+    assert not run(sliver, 0.0)["pass"]            # ...but real if unbuffered
