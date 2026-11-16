@@ -263,6 +263,72 @@ def test_compose_tile_masks_implausible_land_values(tmp_path, monkeypatch):
     assert np.all(z[z != 8.0] == 10.0)   # everywhere else, s1m's 10 m stands
 
 
+def test_implausible_land_mask_keeps_quarry_pits_but_drops_blend_halo():
+    """The floor was -15 m until 2026-11-16 and deleted real quarry floors
+    (Clinton Point -84 m, Richmond -99 m) in every basin. Corruption is
+    sentinel blends (~-300000 m) ringed by a 1-px halo of moderate partial
+    blends; a pit has no extreme neighbors and must survive whole."""
+    importorskip("scipy")
+    import dem_pipeline.composite as composite
+
+    a = np.full((40, 40), 10.0, dtype="f4")
+    a[20:30, 20:30] = -84.0              # quarry floor
+    a[5, 5] = -529999.5                  # sentinel blend
+    a[5, 6] = -40.0                      # its partial-blend halo
+    a[6, 7] = -20.0                      # halo, 2 px (diagonal) away
+    a[5, 12] = -40.0                     # isolated, 7 px away: a real pit
+    a[35, 35] = -250.0                   # below the floor on its own
+    a[0, 0] = 1600.0                     # above the ceiling
+    a[1, 1] = np.nan
+    bad = composite.implausible_land_mask(a)
+    assert not bad[20:30, 20:30].any()   # whole pit kept
+    assert bad[5, 5] and bad[5, 6] and bad[6, 7]
+    assert not bad[5, 12]
+    assert bad[35, 35] and bad[0, 0]
+    assert not bad[1, 1]
+    assert not bad[4, 5]                 # halo never eats positive land
+    assert bad.sum() == 5
+
+
+def test_compose_tile_keeps_below_sea_level_quarry(tmp_path, monkeypatch):
+    """End to end: a -84 m pit on land (no water source) must reach the
+    product as s1m, not become nodata / fill (the 0202 Clinton Point hole)."""
+    importorskip("scipy")
+    rasterio = importorskip("rasterio")
+    from rasterio.transform import Affine
+
+    import dem_pipeline.composite as composite
+    import dem_pipeline.grid as grid_mod
+    from dem_pipeline.grid import GridSpec
+
+    (tmp_path / "config").mkdir()
+    (tmp_path / "data" / "intermediate" / "vrt").mkdir(parents=True)
+    GridSpec(
+        epsg=4269, nodata=NODATA, collar_px=0,
+        cudem_geotransforms={TILE: GT}, cudem_sizes={TILE: [90, 90]},
+    ).dump(tmp_path / "config" / "tile_grid.json")
+
+    def fake_repo_path(*parts):
+        return tmp_path.joinpath(*parts)
+
+    monkeypatch.setattr(grid_mod, "repo_path", fake_repo_path)
+    monkeypatch.setattr(composite, "repo_path", fake_repo_path)
+    monkeypatch.setattr(composite, "load_config", lambda: _test_cfg(tmp_path))
+
+    s1m = np.full((90, 90), 30.0, dtype="f4")
+    s1m[30:60, 30:60] = -84.0
+    make_geotiff(tmp_path / "data/intermediate/vrt/s1m.vrt", s1m,
+                 Affine.from_gdal(*GT), "EPSG:4269", nodata=NODATA)
+
+    out_tif = composite.compose_tile(TILE, out_dir=tmp_path / "out")
+    with rasterio.open(out_tif) as src:
+        z = src.read(1)
+    with rasterio.open(tmp_path / "out" / f"{TILE}_source.tif") as src:
+        ids = src.read(1)
+    assert np.allclose(z[30:60, 30:60], -84.0)
+    assert np.all(ids[30:60, 30:60] == 1)
+
+
 def test_compose_tile_land_void_fill_yields_to_bathymetry(tmp_path, monkeypatch):
     """Some land products (confirmed for both s1m and dem13, 2026-09-09) fill
     known-open-water areas with a flat 0 m plate instead of proper nodata.
