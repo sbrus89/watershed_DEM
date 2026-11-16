@@ -13,6 +13,7 @@
 import argparse
 import logging
 import re
+from pathlib import Path
 
 import dem_pipeline as dp
 from dem_pipeline.download import write_manifest
@@ -173,8 +174,35 @@ def ehydro_rows(cfg, basin_geom) -> list[dict]:
         if not data.get("properties", {}).get("exceededTransferLimit") and \
            len(feats) < 1000:
             break
+    rows = _drop_test_duplicates(rows)
     log.info("eHydro: %d basin-intersecting surveys", len(rows))
     return rows
+
+
+def _drop_test_duplicates(rows: list[dict]) -> list[dict]:
+    """Drop `<survey>_TEST.ZIP` catalog records that shadow a real survey.
+
+    The eHydro catalog listed CENAN_DIS_NY_22_FII_20260304_OT_5624_60_TEST.ZIP
+    (0203, found 2026-11-16) next to the real ..._60.ZIP with an identical
+    date and footprint; the _TEST blob is a 404, so stage 04 failed the whole
+    run on a file that is not data. Only a _TEST record whose non-_TEST twin
+    is also present is dropped: a lone _TEST record is kept, so if it is a
+    real survey that was merely named oddly it is still fetched (and a 404
+    still fails loudly rather than silently losing coverage).
+    """
+    def stem(r):
+        return Path(r["dest"]).stem
+    stems = {stem(r).upper() for r in rows}
+    keep = []
+    for r in rows:
+        s = stem(r).upper()
+        if s.endswith("_TEST") and s[:-len("_TEST")] in stems:
+            log.warning("eHydro: dropping catalog test record %s (real "
+                        "survey %s is also listed)", Path(r["dest"]).name,
+                        stem(r)[:-len("_TEST")])
+            continue
+        keep.append(r)
+    return keep
 
 
 def coned_rows(cfg, basin_geom) -> list[dict]:
