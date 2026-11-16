@@ -102,9 +102,41 @@ sources:
     depth_positive_down: true
     vertical_ref: MLLW
     resampling: bilinear
-  eaarlb:
+  nos_grids:
     role: water
     priority: 2
+    # NOAA multibeam hydrographic surveys of the tidal Hudson (2016-2018),
+    # 0.5 m GeoTIFFs that NYSDEC converted to NAVD88 m, positive up, and
+    # hosts for the Hudson River Estuary Program. Index: DEC
+    # "Benthic_Data_Footprints" FeatureServer
+    # (services6.arcgis.com/DZHaqZm9cxOD4CWM), queried 2026-11-16: every
+    # survey whose footprint intersects the 0203 polygon (Yonkers ->
+    # Haverstraw). Same block format as 0202 (master 4348000). Here CUDEM also
+    # covers this reach; nos_grids sits above it because the multibeam is
+    # newer and native 0.5 m. Stage 05 refuses any raster outside
+    # plausible_range_m or with a non-negative median.
+    dir: data/raw/nos_grids
+    resampling: average
+    plausible_range_m: [-70.0, 5.0]
+    items:
+    - name: D00211   # Tarrytown 2016; 100% of footprint in 0203; 35 MB zip
+      url: "https://www.dec.ny.gov/fs/data/HREP/d211_nvd88.zip"
+      bbox: [-73.887, 41.0483, -73.8756, 41.0841]
+    - name: H13138   # Yonkers to Mario Cuomo Bridge 2018; 100% in 0203; 315 MB zip
+      url: "https://www.dec.ny.gov/fs/data/HREP/h13138_nvd88.zip"
+      bbox: [-73.9167, 40.949, -73.868, 41.0733]
+    - name: H13092   # Mario Cuomo Bridge to Scarborough 2017; 100% in 0203; 205 MB zip
+      url: "https://www.dec.ny.gov/fs/data/HREP/h3092_nvd88.zip"
+      bbox: [-73.9075, 41.0718, -73.8681, 41.139]
+    - name: H13023   # Hook Mountain to Haverstraw Bay 2017; 100% in 0203; 309 MB zip
+      url: "https://www.dec.ny.gov/fs/data/HREP/h3023_nvd88.zip"
+      bbox: [-73.9621, 41.136, -73.8769, 41.2177]
+    - name: H13022   # Haverstraw Bay to Danskammer Pt 2017; 33% in 0203 (rest 0202); 583 MB zip
+      url: "https://www.dec.ny.gov/fs/data/HREP/h3022_nvd88.zip"
+      bbox: [-74.0112, 41.2099, -73.9368, 41.579]
+  eaarlb:
+    role: water
+    priority: 3
     # Delaware-specific dataset (Hancock NY -> Portland PA lidar bathymetry);
     # kept configured only because dem_pipeline.composite.WATER_SOURCES is a
     # code-level list that always includes "eaarlb" (compose_tile looks it up
@@ -116,7 +148,7 @@ sources:
     resampling: average
   cudem19:
     role: water
-    priority: 3
+    priority: 4
     # Same NCEI ninth-arcsecond dataset (8483). Confirmed live 2026-11-13
     # (urllist8483.txt): 35 tiles touch the 2 km-buffered basin, all under
     # northeast_sandy. Stage 02 makes the authoritative selection.
@@ -129,7 +161,7 @@ sources:
     resampling: near   # already on the target grid
   coned:
     role: water
-    priority: 4
+    priority: 5
     # NJ/DE CoNED 2015. May reach Raritan Bay/Sandy Hook, but left disabled
     # as in the other basins; revisit only if stage 10 QA shows a water gap.
     # Newer candidates NOT wired in (would need code): NGS Long Island Sound
@@ -223,6 +255,7 @@ compositing:
     eaarlb: 12
     cudem19: 13
     coned: 14
+    nos_grids: 15
     filled: 99
 
 output:

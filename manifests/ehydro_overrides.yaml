@@ -1,0 +1,49 @@
+# Per-survey exceptions to sources.ehydro defaults (feet, positive down, MLLW).
+# Every entry must cite the evidence that justified it.
+#
+# East River (Throgs Neck reach, ~-73.79 40.80), CENAN. Each survey has a few
+# (3-26) soundings at -35.4..-37.2 m NAVD88, just below the global -35 m
+# floor. These are real depths, not unit/sign errors: CUDEM reads -35.0..-36.4 m
+# at the same points (checked 2026-11-13), and the shallow ends (-0.8..-6.4 m)
+# are normal. Floor deepened to -40 m for these surveys only (user approved
+# 2026-11-13). Do NOT extend this to NB_0x_*_20190827 (Newark Bay): those
+# surveys have 2 bogus -40.65 m points on land, where CUDEM reads +2.5 m.
+
+CENAN_DIS_ER_01_EAS_20230614_CS_5297_75:
+  plausible_min_m: -40.0
+
+CENAN_DIS_ER_01_EAS_20240402_CS_5425_90:
+  plausible_min_m: -40.0
+
+CENAN_DIS_ER_01_EAS_20260302_CS_5654_90:
+  plausible_min_m: -40.0
+
+ER_01_EAS_20120820_CS_3843_75X:
+  plausible_min_m: -40.0
+
+ER_01_EAS_20140115_CS_4069_75X:
+  plausible_min_m: -40.0
+
+ER_01_EAS_20141216_CS_4232_75X:
+  plausible_min_m: -40.0
+
+ER_01_EAS_20151109_CS_4398_75X:
+  plausible_min_m: -40.0
+
+ER_01_EAS_20170130_CS_4542_75X:
+  plausible_min_m: -40.0
+
+ER_01_EAS_20180423_CS_4681_75X:
+  plausible_min_m: -40.0
+
+ER_01_EAS_20181126_CS_4767_75X:
+  plausible_min_m: -40.0
+
+ER_01_EAS_20201119_CS_5003_75:
+  plausible_min_m: -40.0
+
+ER_01_EAS_20220413_CS_5144_75:
+  plausible_min_m: -40.0
+
+ER_02_SBI_20180423_CS_4681_75X:
+  plausible_min_m: -40.0
