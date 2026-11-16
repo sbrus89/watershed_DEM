@@ -258,3 +258,22 @@ def test_nos_grids_rejects_a_swapped_bbox(tmp_path):
         {"url": "https://x/a.zip", "bbox": [41.573, -73.978, 41.931, -73.933]}]}}}
     with raises(ValueError):
         disc.nos_grids_rows(cfg)
+
+
+def test_ehydro_test_record_shadowing_a_real_survey_is_dropped(
+        tmp_path, monkeypatch):
+    """0203's catalog listed CENAN_..._60_TEST.ZIP beside the real
+    CENAN_..._60.ZIP; the _TEST blob 404s and failed stage 04 for the whole
+    basin. The twin must be dropped, but a lone _TEST record (no real twin)
+    must survive -- it may be the only copy of a real survey."""
+    importorskip("shapely")
+    from shapely.geometry import box
+    import requests
+    calls = []
+    monkeypatch.setattr(requests, "get", _ehydro_fake_get(calls, {
+        "CENAN": [_survey("NY_22_FII", -73.3), _survey("NY_22_FII_TEST", -73.3),
+                  _survey("HU_01_TRY_TEST", -73.6)]}))
+    rows = disc.ehydro_rows(_ehydro_cfg(tmp_path, "CENAN"),
+                            box(-74, 37, -73, 38))
+    assert sorted(Path(r["dest"]).name for r in rows) == \
+        ["HU_01_TRY_TEST.zip", "NY_22_FII.zip"]
