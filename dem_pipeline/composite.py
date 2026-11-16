@@ -45,7 +45,37 @@ _RESAMPLING = {"near": "nearest", "average": "average", "bilinear": "bilinear"}
 # per-pixel outliers lets first_valid() fall through to the next-priority
 # land source instead of losing (or corrupting) the whole tile over a
 # handful of bad edge pixels.
-LAND_PLAUSIBLE_MIN, LAND_PLAUSIBLE_MAX = -15.0, 1500.0
+#
+# The FLOOR is deliberately deep. It was -15 m until 2026-11-16, which
+# silently deleted real below-sea-level land in every basin: aggregate
+# quarry pits that S1M and dem13 both map as benched floors well below
+# NAVD88 0 (Clinton Point on the Hudson -84 m, Richmond VA -99 m, King of
+# Prussia PA -73 m, Occoquan/Travilah/Manassas...), all outside the water
+# mask, leaving nodata holes and fill-interpolated rims. The corruption the
+# floor exists for is nowhere near that range: blends run to ~-300000 m.
+# Their only moderate values are a 1-px halo of partial blends around those
+# extreme pixels (8 Delaware coastal tiles: every moderate px within 1.4 px
+# of a < -1000 m px, none beyond 3 px) -- caught by the halo rule below,
+# which a real pit (no extreme neighbors) never trips.
+LAND_PLAUSIBLE_MIN, LAND_PLAUSIBLE_MAX = -200.0, 1500.0
+# Below-sea-level values within LAND_CORRUPT_HALO_PX (8-connected, so
+# diagonals count) of an out-of-window pixel are treated as blend halo and
+# masked too.
+LAND_CORRUPT_HALO_MIN, LAND_CORRUPT_HALO_PX = -15.0, 2
+
+
+def implausible_land_mask(arr: np.ndarray) -> np.ndarray:
+    """Pixels of a land-source array to discard as corrupt (see above)."""
+    from scipy.ndimage import binary_dilation
+
+    finite = np.isfinite(arr)
+    with np.errstate(invalid="ignore"):
+        out = finite & ((arr < LAND_PLAUSIBLE_MIN) | (arr > LAND_PLAUSIBLE_MAX))
+        if out.any():
+            halo = binary_dilation(out, structure=np.ones((3, 3), bool),
+                                   iterations=LAND_CORRUPT_HALO_PX)
+            out |= halo & finite & (arr < LAND_CORRUPT_HALO_MIN)
+    return out
 
 # Some land products (confirmed for both `s1m` and `dem13`, 2026-09-09) fill
 # known-open-water areas with a flat 0 m plate instead of proper nodata,
@@ -258,15 +288,15 @@ def compose_tile(name: str, out_dir: Path | None = None) -> Path:
             arr = warp_to_tile(vrt, pad_gt, pad_width, pad_height, dst_crs,
                                scfg["resampling"], nodata)
             if s in LAND_SOURCES:
-                bad = np.isfinite(arr) & (
-                    (arr < LAND_PLAUSIBLE_MIN) | (arr > LAND_PLAUSIBLE_MAX))
+                bad = implausible_land_mask(arr)
                 if bad.any():
                     log.warning(
                         "%s: %s: masking %d implausible land px (range "
-                        "[%.1f, %.1f] outside [%g, %g])",
+                        "[%.1f, %.1f]; window [%g, %g] + %d-px halo < %g)",
                         name, s, int(bad.sum()),
                         float(np.min(arr[bad])), float(np.max(arr[bad])),
-                        LAND_PLAUSIBLE_MIN, LAND_PLAUSIBLE_MAX)
+                        LAND_PLAUSIBLE_MIN, LAND_PLAUSIBLE_MAX,
+                        LAND_CORRUPT_HALO_PX, LAND_CORRUPT_HALO_MIN)
                     arr[bad] = np.nan
             if np.isfinite(arr).any():
                 arrays[s] = arr
