@@ -1,0 +1,3 @@
+url,dest,size,source,tile,bbox
+https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NCEI_ninth_Topobathy_2014_8483/northeast_sandy/ncei19_n41x50_w074x00_2015v1.tif,/pscratch/sd/s/sbrus/UpperHudson_watershed_DEM/data/raw/cudem19/ncei19_n41x50_w074x00_2015v1.tif,,cudem19,,
+https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NCEI_ninth_Topobathy_2014_8483/northeast_sandy/ncei19_n41x50_w074x25_2015v1.tif,/pscratch/sd/s/sbrus/UpperHudson_watershed_DEM/data/raw/cudem19/ncei19_n41x50_w074x25_2015v1.tif,,cudem19,,
