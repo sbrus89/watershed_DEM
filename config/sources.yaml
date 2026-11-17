@@ -9,6 +9,14 @@
 #
 # All vertical datums are NAVD88 meters unless noted. All endpoints verified
 # live 2026-11-13.
+#
+# KNOWN GAP (accepted by the user 2026-11-17, like Delaware's offshore
+# strip): the WBD polygon takes in nearshore Atlantic south of Montauk
+# (tile n41x00_w072x00, lon -72.00..-71.87, lat 40.96..41.00) that no
+# configured source covers -- no CUDEM 1/9" tile exists for that cell and
+# USGS 1/3" n41w072 does not exist. Stays nodata: 2,497,164 px, the whole of
+# qa basin_nodata's failure for this basin. Candidate fills if ever needed:
+# CUDEM 1/3" or BlueTopo through the nos_grids code path.
 
 project:
   name: lowerhudson19
@@ -98,6 +106,11 @@ sources:
     # Assumed same convention as CENAB/CENAO (feet, positive down, MLLW).
     # CENAN and CENAE are NEW to this pipeline and NOT yet verified against
     # survey metadata -- ImplausibleDepthsError is the backstop.
+    # Full run 2026-11-16: 1261 surveys, 15 skipped, ALL left to CUDEM by
+    # user decision 2026-11-17 (see manifests/ehydro_overrides.yaml for
+    # the list and reasons). One of them, NJ_22_SBM_20210330_OT_5035_30
+    # (lon -74.035..-73.978, lat 40.10..40.28), lies outside
+    # vdatum.sample_bounds; deliberately NOT widened for one survey.
     depth_units: feet
     depth_positive_down: true
     vertical_ref: MLLW

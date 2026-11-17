@@ -47,3 +47,17 @@ ER_01_EAS_20220413_CS_5144_75:
 
 ER_02_SBI_20180423_CS_4681_75X:
   plausible_min_m: -40.0
+
+# ---- Deliberately NOT overridden (left to CUDEM; user decision 2026-11-17) --
+# Rejected by stage 06 in the 2026-11-16 full run; listed so nobody "fixes"
+# them without new evidence.
+# - Newark Bay NB_01_MAI/NB_02_SEL/NB_03_PEL/NB_04_PNE_20190827: 2 bogus
+#   -40.65 m points on land (CUDEM +2.5 m).
+# - NB_04_PNE_20131114_PS_4056_30X: placement-site survey up to +13.8 m.
+# - Beach/inlet surveys whose soundings run onto dunes above the +5 m
+#   ceiling (+6..+12 m): NY_22_FII_20140417/20160403/20180403/20200330/
+#   20200508/20210309 (Fire Island Inlet), JI_01_INL_20210113 (Jones
+#   Inlet), NJ_22_SBM_20220322 (Sandy Hook area),
+#   CENAN_DIS_LM_01_HBR_20250116.
+# - NJ_22_SBM_20210330_OT_5035_30: outside vdatum.sample_bounds (no
+#   MLLW->NAVD88 separation); sample_bounds not widened for one survey.
