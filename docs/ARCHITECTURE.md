@@ -16,6 +16,7 @@ Contents:
 8. [Testing](#8-testing)
 9. [Known gaps, open follow-ups, first-run risks](#9-known-gaps-open-follow-ups-first-run-risks)
 10. [History](#10-history)
+11. [Region merge (multi-basin product)](#11-region-merge-multi-basin-product)
 
 ---
 
@@ -494,3 +495,79 @@ First-run risks (nothing network-facing has met real payloads):
   half-written pair. Tests: `tests/test_paths.py` (new) plus two resumed-run
   tests in `tests/test_ehydro.py`; suite 69 pass under `de-dem`. The `de-dem`
   env was created for the first time; **the pipeline itself is still unrun**.
+
+## 11. Region merge (multi-basin product)
+
+Each HUC-4 basin runs as its own product in its own git worktree (branch off
+`master`, own env, own `config/sources.yaml`). `scripts/merge_region.py` +
+`dem_pipeline/merge.py`, driven by `config/merge_region02.yaml`, combine the
+finished basin tile sets into one region product (`midatlantic19_<tile>_2026v1`
+for HUC-2 region 02, written to `output.root`, never into a basin checkout).
+
+```bash
+python scripts/merge_region.py all --nproc 1      # prepare, tiles, vrt, qa
+python scripts/merge_region.py tiles --tile n39x75_w076x00   # one tile
+```
+
+**Why a merge is not a copy.** Neighbouring basins produce the same 0.25° tile
+wherever their +2 km buffered domains overlap (region 02: 731 basin tiles →
+566 footprints; 141 shared by 2 basins, 12 by 3). Measured 2026-11-17, the
+versions differ for three reasons: (1) beyond its data edge a basin has only
+50-px `fillnodata` extrapolation (provenance 99), tens of metres wrong;
+(2) shared estuaries were composed from each basin's own eHydro/water mask
+(1–20 m apart at p99 — C&D Canal, Raritan/NY Harbor, Potomac mouth);
+(3) ocean pixels outside every HUC-4 polygon.
+
+**Design (per pixel, finished tiles only — no recomposition):**
+
+- *Territory*: a basin owns its unbuffered WBD HUC-4 polygon; outside all
+  polygons, the basin with the nearest polygon (Voronoi of densified boundary
+  points, built once in EPSG:5070 by `build_territories`, so adjacent tiles
+  agree). Polygons are kept separate from their reprojected exterior pieces and
+  burned last (`rasterize_territories`) — unioning them trips GEOS topology
+  errors.
+- *Feather*: weight = `composite.feather_alpha(territory, feather_px=30)`
+  computed on a window padded by `feather_px+2` so overlapping collars match.
+- *Real data first*: weight is zeroed where a version is nodata or has
+  provenance `filled`/`nodata`. No weight left → the real version with the
+  largest territory weight (tier 2), else any finite version (tier 3).
+  Ties break on config basin order.
+- Outputs per tile: elevation COG (stage-09 COG settings), `_source.tif`
+  (provenance of the dominant version) and `_basin.tif` (uint8 HUC-4 % 100,
+  e.g. 4 = 0204; 0 = nodata).
+- *Single-basin tiles* are byte-copied when their grid already equals the
+  merged spec, else **restamped** (same pixels, new geotransform; COG read
+  back and compared).
+
+**Grid.** `prepare` unions every basin's audited CUDEM geotransforms (any
+disagreement is fatal; region 02 has 144, zero conflicts) and takes the
+non-CUDEM collar/shift convention from `merge.grid_convention_from`. The two
+Hudson basins (0202/0203) audited a newer CUDEM vintage (EPSG:5498) with a
+different modal shift (−0.00048/+0.00048 px vs −1e-6/−0.000928) — about
+0.001 px apart — so their non-CUDEM tiles are restamped to the 5-basin
+convention. `check_restamp` refuses anything beyond `restamp_tol_px` (0.01),
+so a real misregistration can never be relabelled away.
+
+**Resume safety.** Every write is `.tmp.tif` + rename; the per-tile stats JSON
+(`manifests/merge_stats/<tile>.json`) is written last and holds a fingerprint
+of merge version, parameters, target grid, territory-file digest and each
+input's path/size/mtime. A tile is skipped only if that fingerprint matches
+and the output passes `GridSpec.tile_matches` — recomposing a basin tile
+invalidates exactly the merged tiles that consumed it. Bump
+`merge.MERGE_VERSION` when blend semantics change.
+
+**QA** (`qa/qa_report.json`): completeness, grid conformity (merged spec),
+cross-tile seams, nodata inside the region polygon, and a merge summary
+(modes, pixel tiers, and tiles whose blend-band spread p99 exceeds
+`band_spread_flag_m` — report-only, for visual review). Accepted, documented
+exceptions live in the merge config: `basin_nodata_accepted_px` (fails if a
+known gap grows) and `seams_accepted`.
+
+**Memory.** A 3-basin tile peaks ~6.7 GB (2-basin ~5 GB); the login-node
+per-user cgroup cap is 30 GB, so `--nproc 1` beside other work (≈3 h for
+region 02), or more on a compute node.
+
+**Not done / options.** Recomposing shared estuary tiles from the union of
+all basins' sources would beat blending finished products there; revisit only
+if the band-spread review shows visible artifacts.
+

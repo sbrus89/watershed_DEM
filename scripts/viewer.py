@@ -19,6 +19,12 @@ data/final/quicklooks/.viewer_cache/, next to the pipeline's own quicklook
 cache directory).
 
 Usage: python scripts/viewer.py [--port 8765] [--host 127.0.0.1]
+       python scripts/viewer.py --merge-config config/merge_region02.yaml
+
+--merge-config views a region merge (scripts/merge_region.py) instead of
+this checkout's basin product: tiles, mosaic VRT and QA report come from the
+merge's output root, the boundary layer shows every member HUC-4, and the
+render cache lives under <root>/quicklooks/.viewer_cache/.
 
 On a remote host (e.g. a NERSC login node), the server only binds to
 127.0.0.1 by default -- tunnel to it from your laptop with:
@@ -62,8 +68,44 @@ SOURCE_COLORS_BY_NAME = {
 }
 
 
+# Set by --merge-config: a config-shaped dict whose paths are absolute
+# (dp.path() of an absolute path returns it unchanged) plus the merge's
+# tile-list / boundary files. None = this checkout's basin product.
+_MERGE = None
+
+
+def _merge_view(cfg_path: str) -> dict:
+    from dem_pipeline import merge
+
+    mcfg = merge.load_merge_config(cfg_path)
+    root = merge.output_root(mcfg)
+    p = mcfg["project"]
+    paths = merge.prepared_paths(mcfg)
+    return {
+        "cfg": {
+            "project": {"name": p["name"], "version": p["version"]},
+            "output": {"tile_dir": str(merge.tiles_dir(mcfg)),
+                       "vrt": str(root / f"{p['name']}_{p['version']}.vrt")},
+            "qa": {"dir": str(root / "qa"),
+                   "quicklook_dir": str(root / "quicklooks")},
+            "compositing": {"source_ids": merge.merged_source_ids(
+                merge.load_basins(mcfg))},
+        },
+        "tiles_geojson": paths["tiles"],
+        "boundary": (paths["region"], "basins"),
+    }
+
+
 def _cfg():
-    return dp.load_config()
+    return _MERGE["cfg"] if _MERGE else dp.load_config()
+
+
+def _tiles_geojson_path() -> Path:
+    return _MERGE["tiles_geojson"] if _MERGE else dp.output_tiles_geojson(_cfg())
+
+
+def _boundary_source() -> tuple[Path, str]:
+    return _MERGE["boundary"] if _MERGE else (dp.huc4_boundary_gpkg(), "huc4")
 
 
 def _cache_dir() -> Path:
@@ -403,7 +445,7 @@ def depth_legend() -> dict:
 def build_tiles_geojson() -> dict:
     """The configured HUC-4's output tile list, enriched with coverage/QA flags."""
     cfg = _cfg()
-    with open(dp.output_tiles_geojson(cfg)) as f:
+    with open(_tiles_geojson_path()) as f:
         fc = json.load(f)
 
     coverage, land_overlap = {}, {}
@@ -412,6 +454,8 @@ def build_tiles_geojson() -> dict:
     if qa_path.exists():
         with open(qa_path) as f:
             checks = json.load(f)
+        if isinstance(checks, dict):        # merge report: {"checks": [...]}
+            checks = checks.get("checks", [])
         by_name = {c.get("check"): c for c in checks}
         coverage = by_name.get("coverage", {}).get("tiles", {})
         land_overlap = by_name.get("cudem_land_overlap", {}).get("tiles", {})
@@ -452,7 +496,8 @@ def basin_boundary_geojson() -> dict:
     """
     import geopandas as gpd
 
-    gdf = gpd.read_file(dp.huc4_boundary_gpkg(), layer="huc4")
+    gpkg, layer = _boundary_source()
+    gdf = gpd.read_file(gpkg, layer=layer)
     return json.loads(gdf.to_json())
 
 
@@ -499,7 +544,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/tiles.geojson":
                 self._send_json(build_tiles_geojson())
             elif path == "/api/basin_boundary.geojson":
-                gpkg = dp.huc4_boundary_gpkg()
+                gpkg, _ = _boundary_source()
                 if not gpkg.exists():
                     self._send_json({"error": "boundary not found"}, 404)
                 else:
@@ -614,8 +659,14 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address (default 127.0.0.1; use 0.0.0.0 to allow "
                          "LAN access -- only on a trusted network)")
+    ap.add_argument("--merge-config", default=None,
+                    help="view a region merge (e.g. config/merge_region02.yaml) "
+                         "instead of this checkout's basin product")
     args = ap.parse_args()
     dp.setup_logging()
+    global _MERGE
+    if args.merge_config:
+        _MERGE = _merge_view(args.merge_config)
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"DE watershed DEM viewer running at http://{args.host}:{args.port}/")

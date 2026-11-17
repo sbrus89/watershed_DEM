@@ -43,6 +43,8 @@ pytest                          # or: python tests/run_tests.py (no pytest neede
 bash scripts/run_test_slice.sh  # REQUIRED first pipeline run: one Philly tile
 make all                        # full basin (~200 GB download, ~1 day)
 python scripts/viewer.py        # interactive QA viewer, http://127.0.0.1:8765/
+python scripts/merge_region.py all --nproc 1   # region-wide merge of basin products (ARCHITECTURE §11)
+python scripts/viewer.py --merge-config config/merge_region02.yaml --port 8778  # view the merged product
 ```
 
 `scripts/viewer.py` (+ `scripts/viewer_static/`) is a local, read-only Leaflet
@@ -55,7 +57,9 @@ from `data/final/dewatershed19_2026v1.vrt` on demand (this replaced an
 `L.imageOverlay` of the static mosaic_topo.png, whose baked-in
 title/colorbar/axes never registered correctly against the imagery). Binds
 to 127.0.0.1 only; tunnel from a remote host with
-`ssh -L 8765:localhost:8765 <host>`. Nothing here feeds the product.
+`ssh -L 8765:localhost:8765 <host>` -- Perlmutter login
+nodes (loginNN) are internal-only, so hop through the public name:
+`ssh -J <user>@perlmutter.nersc.gov -L 8765:localhost:8765 <user>@loginNN`. Nothing here feeds the product.
 
 Stages are idempotent (atomic writes, resumable downloads, `.done`
 sentinels in `manifests/`). Rerun `make` after any interruption. Single-tile

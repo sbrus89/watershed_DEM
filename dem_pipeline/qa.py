@@ -20,11 +20,16 @@ from .grid import GridSpec, parse_tile_name, tile_name, TILE_DEG
 log = logging.getLogger(__name__)
 
 
-def check_grid_conformity(tile_paths: dict[str, Path]) -> dict:
-    """Every tile's geotransform/size must match the GridSpec exactly."""
+def check_grid_conformity(tile_paths: dict[str, Path],
+                          spec: GridSpec | None = None) -> dict:
+    """Every tile's geotransform/size must match the GridSpec exactly.
+
+    ``spec`` defaults to this checkout's config/tile_grid.json; the region
+    merge (dem_pipeline.merge) passes its combined multi-basin spec.
+    """
     import rasterio
 
-    spec = GridSpec.load()
+    spec = spec or GridSpec.load()
     failures = {}
     for name, p in tile_paths.items():
         gt_expected, w, h = spec.tile_geotransform(name)
@@ -40,7 +45,8 @@ def check_grid_conformity(tile_paths: dict[str, Path]) -> dict:
             "n_tiles": len(tile_paths), "failures": failures}
 
 
-def check_seams(tile_paths: dict[str, Path]) -> dict:
+def check_seams(tile_paths: dict[str, Path], spec: GridSpec | None = None,
+                cfg: dict | None = None) -> dict:
     """Difference abutting edge rows/cols of neighboring tiles.
 
     With zero collar the shared boundary has no duplicated samples, so we
@@ -65,10 +71,10 @@ def check_seams(tile_paths: dict[str, Path]) -> dict:
     """
     import rasterio
 
-    full_cfg = load_config()
+    full_cfg = cfg or load_config()
     cfg = full_cfg["qa"]
     cudem_id = full_cfg.get("compositing", {}).get("source_ids", {}).get("cudem19")
-    spec = GridSpec.load()
+    spec = spec or GridSpec.load()
     results = {}
     flagged = {}
     inherent_misalignment = {}
@@ -199,7 +205,8 @@ def check_cudem_land_overlap(tile_paths: dict[str, Path]) -> dict:
             "worst_abs_median_m": worst, "tiles": stats}
 
 
-def check_basin_nodata(tile_paths: dict[str, Path]) -> dict:
+def check_basin_nodata(tile_paths: dict[str, Path], poly=None,
+                       cfg: dict | None = None) -> dict:
     """Nodata pixels left INSIDE the HUC-4 polygon.
 
     The product is only promised inside the basin, so nodata outside it is
@@ -211,22 +218,31 @@ def check_basin_nodata(tile_paths: dict[str, Path]) -> dict:
     The polygon is shrunk inward by qa.basin_nodata_edge_buffer_m (default
     100 m) so source-coverage slivers along the WBD line don't count. Fails
     when more than qa.basin_nodata_max_px (default 0) such px remain.
+
+    ``poly`` (a GeoDataFrame) and ``cfg`` default to this checkout's stage-01
+    HUC-4 polygon and config; the region merge passes the union of its
+    basins' HUC-4 polygons. ``qa.basin_nodata_accepted_px`` ({tile: max px})
+    accepts documented gaps: a listed tile only fails if it exceeds its
+    recorded count, so a known gap can't silently grow.
     """
     import geopandas as gpd
     import rasterio
     from rasterio.features import geometry_mask
 
-    cfg = load_config()
+    cfg = cfg or load_config()
     qcfg = cfg["qa"]
     buf_m = float(qcfg.get("basin_nodata_edge_buffer_m", 100.0))
     max_px = int(qcfg.get("basin_nodata_max_px", 0))
-    gpkg = repo_path("data", "intermediate",
-                     f"huc4_{cfg['project']['huc4']}.gpkg")
-    poly = gpd.read_file(gpkg, layer="huc4")
+    accepted = {k: int(v) for k, v in
+                (qcfg.get("basin_nodata_accepted_px") or {}).items()}
+    if poly is None:
+        gpkg = repo_path("data", "intermediate",
+                         f"huc4_{cfg['project']['huc4']}.gpkg")
+        poly = gpd.read_file(gpkg, layer="huc4")
     if buf_m > 0:
         poly = poly.to_crs(poly.estimate_utm_crs())
         poly["geometry"] = poly.buffer(-buf_m)
-    tiles, total = {}, 0
+    tiles, total, accepted_hit = {}, 0, {}
     for name, p in tile_paths.items():
         with rasterio.open(p) as src:
             z = src.read(1)
@@ -235,12 +251,17 @@ def check_basin_nodata(tile_paths: dict[str, Path]) -> dict:
                 continue
             inside = ~geometry_mask(geoms, z.shape, src.transform)
             n = int((inside & (z == src.nodata)).sum())
-        if n:
-            tiles[name] = n
-            total += n
+        if not n:
+            continue
+        if name in accepted and n <= accepted[name]:
+            accepted_hit[name] = n
+            continue
+        tiles[name] = n
+        total += n
     return {"check": "basin_nodata", "pass": total <= max_px,
             "nodata_px_in_basin": total, "edge_buffer_m": buf_m,
-            "tiles": dict(sorted(tiles.items(), key=lambda kv: -kv[1]))}
+            "tiles": dict(sorted(tiles.items(), key=lambda kv: -kv[1])),
+            "accepted_gaps": accepted_hit}
 
 
 def coverage_report(tile_paths: dict[str, Path]) -> dict:

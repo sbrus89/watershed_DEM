@@ -1,0 +1,76 @@
+# Region-wide merge of the HUC-2 region 02 (Mid-Atlantic) basin products.
+# Driver: scripts/merge_region.py; logic: dem_pipeline/merge.py;
+# design: docs/ARCHITECTURE.md §11. Decisions confirmed by the user 2026-11-17:
+#   - product name midatlantic19_<tile>_2026v1
+#   - non-CUDEM tiles use the 5-basin grid convention (0204/0205/0206/0207/0208);
+#     the Hudson basins' (0202/0203, newer CUDEM vintage) differs by ~0.001 px
+#     and is restamped, never resampled
+#   - shared pixels: own-territory + feather (nearest polygon outside the region)
+#   - full standalone tiles (no VRT references into the basin checkouts)
+#   - known gaps accepted (qa.basin_nodata_accepted_px)
+
+project:
+  name: midatlantic19
+  version: 2026v1
+  region_id: region02
+
+output:
+  root: /pscratch/sd/s/sbrus/Region02_DEM
+  epsg: 4269
+  cog:                       # identical to every basin's stage-09 settings
+    compress: DEFLATE
+    predictor: 3
+    blocksize: 512
+    overview_resampling: AVERAGE
+
+# Unbuffered HUC-4 polygons define ownership (each basin's stage-01 gpkg is
+# per-basin; WBD keeps neighbouring polygons on one shared boundary).
+wbd:
+  gpkg: /pscratch/sd/s/sbrus/Chesapeake_watershed_DEM/data/raw/wbd/WBD_02_HU2_GPKG.gpkg
+  layer: WBDHU4
+  field: huc4
+
+merge:
+  grid_convention_from: DE
+  # ~90 m blend band (±30 px) across basin boundaries. Land versions agree
+  # (median 0), so this only matters in shared estuaries, where the versions
+  # differ by 1-20 m at p99 (C&D Canal, Raritan/NY Harbor, Potomac mouth).
+  feather_px: 30
+  restamp_tol_px: 0.01
+
+# Order = tie-break priority for the rare pixel where no basin's territory
+# version is real and several neighbours are (merge.blend tier 2/3).
+basins:
+  - {key: DE,              huc4: "0204", root: /pscratch/sd/s/sbrus/DE_watershed_DEM}
+  - {key: Chesapeake,      huc4: "0206", root: /pscratch/sd/s/sbrus/Chesapeake_watershed_DEM}
+  - {key: Susquehanna,     huc4: "0205", root: /pscratch/sd/s/sbrus/Susquehanna_watershed_DEM}
+  - {key: Potomac,         huc4: "0207", root: /pscratch/sd/s/sbrus/Potomac_watershed_DEM}
+  - {key: LowerChesapeake, huc4: "0208", root: /pscratch/sd/s/sbrus/LowerChesapeake_watershed_DEM}
+  - {key: UpperHudson,     huc4: "0202", root: /pscratch/sd/s/sbrus/UpperHudson_watershed_DEM}
+  - {key: LowerHudson,     huc4: "0203", root: /pscratch/sd/s/sbrus/LowerHudson_watershed_DEM}
+
+qa:
+  seam_gradient_flag_m: 5.0
+  basin_nodata_edge_buffer_m: 100
+  basin_nodata_max_px: 0
+  # Known gaps accepted 2026-11-17, counts from each basin's own stage-10
+  # report. A listed tile fails if its count GROWS.
+  basin_nodata_accepted_px:
+    n40x00_w074x00: 34382      # 0204 NJ offshore strip (CoNED/CUDEM end)
+    n41x00_w072x00: 2497164    # 0203 Montauk ocean gap (KNOWN GAP, e08ed65)
+    n44x25_w074x00: 198        # 0202 Adirondack interior S1M void
+  seams_accepted:
+    "n43x50_w073x25|n43x50_w073x00": 5.38   # 0202 1-px seam, accepted 2026-11-16
+    # Merge-introduced, OUTSIDE the region polygon, accepted 2026-11-17: the
+    # northern tile is UpperHudson-only and carries UH fillnodata (prov 99)
+    # past its data edge; the blended southern neighbour correctly replaced
+    # that fill with the other basin's real lidar, so the edge is fill-vs-real.
+    "n42x00_w073x75|n41x75_w073x75": 42.27  # UH fill vs LowerHudson lidar (610 px)
+    "n43x25_w075x75|n43x00_w075x75": 13.02  # UH fill vs Susquehanna lidar (323 px)
+  # Inherent: CUDEM n37x00_w076x00 is 8111 px (same pairs in 0208's own QA)
+  size_mismatches_accepted:
+    "n37x00_w076x25|n37x00_w076x00": [8112, 8111]
+    "n37x25_w076x00|n37x00_w076x00": [8112, 8111]
+  # report-only: shared tiles whose basin versions disagree by more than this
+  # (p99) inside the blend band are listed for visual review
+  band_spread_flag_m: 5.0
