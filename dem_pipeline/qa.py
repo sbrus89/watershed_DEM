@@ -313,6 +313,8 @@ def provenance_quicklook(tile_path: Path, out_dir: Path | None = None) -> Path:
         ids["cudem19"]: (140, 200, 214), ids["coned"]: (190, 225, 232),
         ids["filled"]: (220, 40, 40),
     }
+    if "nos_grids" in ids:          # optional source (Hudson basins)
+        colours[ids["nos_grids"]] = (96, 72, 180)
     with rasterio.open(src_path) as src:
         arr = src.read(1, out_shape=(src.height // 4, src.width // 4))
     rgb = np.zeros(arr.shape + (3,), dtype="u1")

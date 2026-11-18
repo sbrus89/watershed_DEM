@@ -64,6 +64,7 @@ SOURCE_COLORS_BY_NAME = {
     "dem1m_projects": (232, 196, 128), "dem13": (245, 226, 180),
     "ehydro": (26, 92, 158), "eaarlb": (70, 160, 190),
     "cudem19": (140, 200, 214), "coned": (190, 225, 232),
+    "nos_grids": (96, 72, 180),
     "filled": (220, 40, 40),
 }
 
