@@ -1,0 +1,104 @@
+# Channel burn of the region-02 merged product (optional post-processing).
+# Driver: scripts/burn_region.py; logic: dem_pipeline/burn.py;
+# design: docs/ARCHITECTURE.md §12. Decisions confirmed by the user 2026-11-18:
+#   - applied to the finished MERGED product only (midatlantic19); reads it,
+#     never modifies it
+#   - separate product name + separate output directory
+#   - burned pixels may be lidar (1-3) or residual fill (99); bathymetry
+#     sources (11-15) are never lowered
+#   - Delaware (0204) first; other HUC-4s are added to `basins` once their
+#     inputs are prepared and checked
+# Method and constants come from the scratch prototype v3
+# (/pscratch/sd/s/sbrus/channel_geom_explore/proto/proto.py, 2026-11-17),
+# validated on two EAARL-B reaches of the Delaware mainstem.
+
+project:
+  name: midatlantic19b
+  version: 2026v1
+
+# The merged product this burn reads (its output.root, tile grid, tile list,
+# product name and QA exceptions all come from here).
+merge_config: config/merge_region02.yaml
+
+output:
+  root: /pscratch/sd/s/sbrus/Region02_DEM_burned
+
+# Shared inputs (all HUC-4s).
+data:
+  zarrabi_shp: /global/cfs/cdirs/m4457/Bankfull_Meanflow_CONUS_Stream_Reaches/Bankfull_Meanflow_CONUS_Stream_Reaches.shp
+  streamgeo_csv: /pscratch/sd/s/sbrus/channel_geom_explore/dl_streamgeo/STREAM-geo_River_Geometry.csv
+  physio_shp: /pscratch/sd/s/sbrus/channel_geom_explore/regional_curves/dl/gis/physio/physio.shp
+  tiger_year: 2023
+  # National Inventory of Dams (USACE), national CSV; dam points + crest
+  # length -> keep-out buffers for tier-2 cuts (prep/<huc4>/dams.gpkg)
+  nid_csv_url: https://nid.sec.usace.army.mil/api/nation/csv
+  metric_epsg: 26918            # UTM 18N: line sampling / buffers in metres
+
+# HUC-4s to burn. Each needs its NHDPlus HR GDB and the basin's stage-07
+# water mask (tier-1 river polygons). A merged pixel is only burned by the
+# network of the basin that owns it (merged _basin.tif == huc4 % 100).
+basins:
+  - {huc4: "0204",
+     hr_gdb: /pscratch/sd/s/sbrus/DE_watershed_DEM/data/raw/nhdplushr/NHDPLUS_H_0204_HU4_GDB.gdb,
+     water_mask: /pscratch/sd/s/sbrus/DE_watershed_DEM/data/intermediate/water_mask/water_mask.gpkg}
+
+burn:
+  burn_id: 16                   # provenance value of a lowered pixel
+  burnable_ids: [1, 2, 3, 99]   # s1m, dem1m_projects, dem13, filled
+  # Survey sources burnable only OUTSIDE the basin's NHD water polygons
+  # (user decision 2026-11-18): the EAARL-B raster carries merged 2008 PAMAP
+  # land topo off-channel, and CoNED is topobathy -- outside water they are
+  # topo, and left unburnable they dammed 2-6% of the tier-2 network on the
+  # EAARL tiles. Inside water polygons they stay authoritative bathymetry.
+  burnable_outside_water_ids: [12, 14]   # eaarlb, coned
+  wse_ids: [1, 2, 3]            # pixels a tier-1 water surface is sampled from
+  da_min_km2: 1.0               # smallest drainage area burned
+  skip_tidal: true              # STREAM-geo Tidal_Flag reaches (bathymetry's job)
+  # tier 1: DA >= t1_da_km2 inside an NHD river polygon -> parabolic,
+  # area-preserving section of mean depth D below a monotone lidar WSE
+  t1_da_km2: 100.0
+  t1_zarrabi_factor: 0.5        # D = factor x Zarrabi mean-flow depth (gauge pooled)
+  t1_corridor_m: 500.0          # river polygon kept within this of a tier-1 line
+  t1_sample_m: 15.0
+  # tier 2 (and 1b = DA >= t1_da_km2 without a river polygon)
+  t2_factor: 0.4                # D = factor x regional bankfull mean-depth curve
+  t2_min_depth_m: 0.05
+  t2_narrow_da_km2: 10.0        # below this DA, STREAM-geo RF width is halved
+  node_snap_m: 15.0             # junction snapped to lowest px within this
+  snap_corridor_m: 40.0         # least-cost path stays within this of the HR line
+  window_margin_m: 60.0
+  cut_cap_m: 2.0                # deeper cuts need a mapped road/rail crossing
+  crossing_buffer_m: 15.0
+  # A deep (> cut_cap) tier-2 cut touching an NID dam keep-out is capped even
+  # where a road crosses -- dam crests carry roads (F.E. Walter, Downsville
+  # were trenched 24-47 m before this). Radius = dam_buffer_m + half the NID
+  # crest length; NID points sit up to ~350 m from the spillway.
+  dam_buffer_m: 150.0
+  # Tier-1 surface guard (apply step): a corridor-polygon pixel more than
+  # this above the water surface of its nearest centerline sample is on
+  # another water surface (a reservoir pool beside the reach below its dam:
+  # Cannonsville pool 349 m was burned to 307 m) and is not tier-1 burned.
+  t1_surface_tol_m: 2.0
+  # Tier-2 lateral guard (apply step): outside a path's minimal 4-connected
+  # core (path px + one connector per diagonal step), a pixel more than this
+  # above the local bed (thalweg + 1.5 D) is not burned -- the section was
+  # digging into dam faces / spillway walls / gorge banks beside the path
+  # (Downsville 46 m). Culvert notches narrow to the 1-2 px core.
+  t2_lateral_tol_m: 2.0
+  pit_deep_m: 30.0              # 1D depressions deeper than this are quarries
+  max_nan_frac: 0.2             # skip a reach whose window is more void than this
+
+# Regional bankfull MEAN-depth curves D = c * DA^e (SI), first match wins on
+# the physiographic PROVINCE / SECTION (case-insensitive substring; omitted
+# key matches anything). Sources: channel_geom_explore/regional_curves/curves.csv.
+curves:
+  - {province: COASTAL, c: 0.269, e: 0.273}                     # Krstolic & Chaplin 2007
+  - {province: NEW ENGLAND, c: 0.414, e: 0.210}                 # NY Region 3 (NJ Highlands)
+  - {province: PLATEAU, section: CATSKILL, c: 0.242, e: 0.314}  # NY Region 4
+  - {province: PLATEAU, c: 0.193, e: 0.335}                     # Clune 2018 glaciated
+  - {c: 0.204, e: 0.321}                                        # Clune 2018 noncarbonate
+
+qa:
+  # tiles for the (slow, full-tile) depression-fill connectivity check:
+  # the prototype's validation tiles
+  connectivity_tiles: [n42x00_w075x25, n40x25_w075x50, n41x00_w075x25]

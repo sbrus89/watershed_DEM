@@ -17,6 +17,7 @@ Contents:
 9. [Known gaps, open follow-ups, first-run risks](#9-known-gaps-open-follow-ups-first-run-risks)
 10. [History](#10-history)
 11. [Region merge (multi-basin product)](#11-region-merge-multi-basin-product)
+12. [Channel burn (optional, on the merged product)](#12-channel-burn-optional-on-the-merged-product)
 
 ---
 
@@ -382,6 +383,20 @@ Accepted product limitations (do not "fix" silently):
 - EAARL-B deep/turbid voids fall through to lower-priority sources or the
   nodata fill (flagged `filled`).
 - Estuary bathymetry is ~3 m CUDEM except where eHydro/EAARL-B are better.
+- **EAARL-B land topo overrides newer 3DEP on the Upper Delaware floodplain
+  (found 2026-11-18, left as is by user decision).** The stage-07 water mask
+  is NHD polygons ∪ survey footprints, and `eaarlb_footprint` is the whole
+  EAARL-B tile footprint. The EAARL-B raster also carries merged 2008 PAMAP
+  land topo off-channel, so inside that footprint the water stack's EAARL-B
+  (provenance 12) wins over the newer 3DEP land stack well beyond the river:
+  on `n42x00_w075x25` ~17.7M of its 18.3M EAARL-B pixels lie outside the NHD
+  `water` polygons (`n41x00_w075x25`: 4.4M of 4.6M). This contradicts
+  invariant 3 ("on land the newest 3DEP lidar wins") for that swath. Seen as
+  EAARL above the 3DEP surface on tributaries (e.g. Brodhead Creek). Fix
+  options when revisited: restrict the EAARL-B water mask to NHD polygons or
+  to its void-free wetted area, or accept EAARL only where it is below the
+  3DEP surface. A fix changes the merged product, so the burned product
+  (§12) must be rerun afterwards (fingerprints rebuild only affected tiles).
 - **`check_seams` cross-tile edges where both sides' worst-disagreement
   pixel is `cudem19` provenance** — an inherent CUDEM-vintage registration
   mismatch, not a pipeline bug. The grid contract (§2) requires each tile to
@@ -571,3 +586,127 @@ region 02), or more on a compute node.
 all basins' sources would beat blending finished products there; revisit only
 if the band-spread review shows visible artifacts.
 
+## 12. Channel burn (optional, on the merged product)
+
+`scripts/burn_region.py` + `dem_pipeline/burn.py`, driven by
+`config/burn_region02.yaml`, lower mapped stream channels below the lidar
+water surface and write a **new** product (`midatlantic19b_<tile>_2026v1` in
+`/pscratch/sd/s/sbrus/Region02_DEM_burned`). The merged product is only
+read. Decisions confirmed by the user 2026-11-18: apply to the merged product
+only; separate name and directory; burn lidar (1–3) **and** residual fill
+(99); never bathymetry (11–15); Delaware (0204) first.
+
+```bash
+python scripts/burn_region.py all --nproc 4      # prepare, network, tiles, vrt, qa
+python scripts/burn_region.py qa --connectivity  # + ponding check on 3 tiles
+python scripts/burn_region.py tiles --tile n42x00_w075x25
+```
+
+**Why.** The subgrid model samples the DEM at native resolution and uses edge
+statistics; a stream left at its lidar water surface carries no channel
+volume, and a road embankment over a culvert acts as a dam in edge stats.
+Method and constants are the scratch prototype v3
+(`/pscratch/sd/s/sbrus/channel_geom_explore/proto/proto.py`), validated on
+two EAARL-B mainstem reaches (Hancock, Water Gap).
+
+**Inputs.** NHDPlus HR flowlines (FType 460/558, in-network, DA ≥ 1 km²,
+tidal reaches per STREAM-geo `Tidal_Flag` skipped); Zarrabi et al. 2025
+mean-flow depth/width and STREAM-geo RF width, carried from NHDPlusV2.1
+COMIDs onto HR lines by a 200 m / DA-ratio match (`prepare` →
+`prep/<huc4>/ml.gpkg`); USGS physiographic sections → regional bankfull
+mean-depth curves (`curves:` in the config); TIGER roads (all counties
+touching the basin) + rails (`prep/<huc4>/roads.gpkg`); USACE National
+Inventory of Dams points + crest length (`prep/<huc4>/dams.gpkg`, from the
+national CSV); the basin's stage-07 `water` polygons for tier 1.
+
+**Phase A — network (per HUC-4, one process).** The channel profile is a
+network property, so it is computed once per basin, not per tile, from
+windowed reads of the merged tiles (no basin-scale raster):
+
+- *Tier 1* (DA ≥ 100 km² inside a river polygon): water surface = PAVA
+  non-increasing fit of 5×5 medians of lidar-provenance pixels every 15 m,
+  capped across junctions; D = 0.5 × Zarrabi mean-flow depth (DA-smoothed).
+- *Tier 2 / 1b*: junctions snapped to the lowest pixel within 15 m;
+  least-cost path on a local-HAND cost within 40 m of the HR line;
+  downstream-monotone cut-only bed; cuts > 2 m only within 15 m of a mapped
+  road/rail (else capped and flagged) **and never where the cut segment
+  touches an NID dam keep-out** (radius `dam_buffer_m` 150 m + half the
+  crest length): a dam crest carries a road, so the culvert rule alone
+  trenched F.E. Walter and Downsville 24–47 m (fixed 2026-11-19; reported as
+  `seg_capped_at_dam`). NHD's own dam features (FType 343) miss every large
+  Delaware dam, hence NID; 1D depressions > 30 m deep are
+  quarries (never channel); thalweg = bed − 1.5 D, monotone across the
+  network. D = 0.4 × regional curve (min 0.05 m), width = STREAM-geo RF
+  (halved below 10 km², floor 2 px); tier 1b (big reach, no polygon) uses
+  Zarrabi.
+- Output: `spec/<huc4>/<tile>.npz` in **global lattice pixel coordinates**
+  plus `manifests/network_<huc4>.json` (fingerprint, per-tile spec digests,
+  report). Tier-2 reach table: `prep/<huc4>/tier2_reaches.csv`.
+
+**Phase B — tiles (parallel).** Rasterize tier 1 (parabolic area-preserving
+section between river-polygon banks; each pixel takes the water surface of
+its **nearest** centerline sample, so `guard_tier1` drops any pixel whose
+own merged surface is more than `t1_surface_tol_m` = 2 m above that
+surface: the corridor polygon includes a reservoir that touches the reach
+below its dam, and before this guard reservoir pools were trenched to the
+downstream river, e.g. Cannonsville 349 → 307 m, Swinging Bridge, Blue
+Marsh; counted as `n_tier1_surface_guarded`) and tier 2 (parabola over
+width + ≥ 2 px 4-connected spine at thalweg), then `apply_burn` (below).
+Tier 2 has a matching **lateral guard**: outside a path's minimal 4-connected core -- its pixels
+plus one deterministic connector per diagonal step -- a pixel more than
+`t2_lateral_tol_m` = 2 m above the local bed, thalweg + 1.5 D, is not
+burned; without it the section dug into steep ground beside the path, e.g.
+Downsville's dam face cut 46 m beside a path correctly capped at the dam,
+and 59-83% of the > 5 m burn pixels on the Downsville / Hancock tiles were
+such side-slope cuts. Culvert notches narrow to the 1-2 px core. The core is
+explicit because an earlier prototype rule that limited off-path lowering
+broke diagonal 4-connectivity (pits 197 -> 4014); validation tiles' residual
+ponding moved 1.70/6.53/6.73% -> 1.71/6.59/7.11%. Counted as
+`n_tier2_lateral_guarded`. `apply_burn` lowers a pixel only
+if merged `_basin.tif` = that network's HUC-4 % 100, it has data, the target
+is below it, and its provenance is in `burnable_ids` (lidar, fill) **or** in
+`burnable_outside_water_ids` (EAARL-B 12, CoNED 14) and it lies outside the
+basin's NHD `water` polygons. The second rule (user decision 2026-11-18)
+exists because those survey rasters carry land topo off-channel (see §9):
+left unburnable they dammed the tier-2 network on the EAARL tiles
+(residual ponding on Hancock 6.9% vs the prototype's 1.1%). Inside water
+polygons they stay authoritative bathymetry. Lowered pixels get
+provenance **16**. Outputs per tile: elevation COG, `_source.tif`,
+`_basin.tif` (copied), `_burndepth.tif` (burned tiles only); tiles with
+nothing lowered are byte-copied.
+
+**Lattice.** All merged tiles share pixel size and integer-pixel origins, so
+a global (row, col) maps to exactly one pixel in every tile, and both tiles
+of a shared collar burn identically. Pixel-size differences between CUDEM
+vintages (≤ 0.001 px drift per tile) are tolerated; a tile whose origin is
+off the lattice is excluded and copied unburned (region 02:
+`n37x00_w076x00`, the half-pixel-shifted bay-mouth CUDEM tile).
+
+**Resume safety.** Network: fingerprint of burn version, parameters,
+curves, lattice and every input (HR GDB, water mask, prep files, merged
+tiles of the basin). Tiles: fingerprint of version, parameters, grid, the
+three merged inputs' size/mtime and the spec digests; stats JSON
+(`manifests/burn_stats/<tile>.json`) written last. Specs are read through
+the manifest only (a stale `.npz` is ignored; a digest mismatch is fatal).
+Rerunning `merge_region.py` therefore invalidates exactly the affected
+burned tiles (and the network, which reads the merged tiles). Bump
+`burn.BURN_VERSION` when tile semantics change and `burn.NETWORK_VERSION`
+when the network pass changes; the network fingerprint ignores apply-only
+parameters (`APPLY_ONLY_KEYS`), so changing what may be lowered re-burns
+tiles without the ~30 min network rerun.
+
+**QA** (`qa/qa_report.json`): completeness, grid conformity, seams (with
+the merge config's accepted exceptions), burn summary (pixels by tier,
+fill pixels burned, volume, deepest tiles, network reports) and, with
+`--connectivity`, ponding on the snapped network before vs after for
+`qa.connectivity_tiles`.
+
+**Known limitations.** Tier-1 depth validated on one river (two reaches);
+Water Gap tier-2 residual ponding not investigated; no explicit smooth join
+to tidal bathymetry at the head of tide; dams missing from NID (or whose
+NID point is > buffer + half-crest from the crest) can still be cut where a
+road crosses; tidal reaches are skipped even where a small marsh creek
+has no bathymetry; EAARL-vs-3DEP sanity check from the prototype notes not
+implemented (EAARL pixels inside water polygons are never lowered); CoNED
+bathymetry inside water polygons shallower than a tributary's burned
+thalweg leaves a small storage pit at the confluence (Piedmont tile).

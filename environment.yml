@@ -12,6 +12,7 @@ dependencies:
   - pyproj
   - xarray
   - scipy
+  - scikit-image          # channel burn (least-cost path, depression fill)
   - requests
   - tqdm
   - pyyaml

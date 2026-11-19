@@ -702,6 +702,26 @@ def build_vrt(mcfg: dict) -> Path:
 # QA
 # --------------------------------------------------------------------------
 
+def apply_seam_acceptance(seams: dict, qcfg: dict) -> dict:
+    """Move documented exceptions out of a qa.check_seams result and set its
+    pass flag. An accepted edge (qa.seams_accepted, {"a|b": max_m}) only
+    passes while its step stays <= the recorded value; inherent size
+    mismatches (e.g. an 8111-px CUDEM tile beside 8112-px neighbours) are
+    accepted by exact pair and sizes (qa.size_mismatches_accepted)."""
+    accepted = {k: float(v) for k, v in (qcfg.get("seams_accepted") or {}).items()}
+    seams["accepted"] = {k: v for k, v in seams["flagged"].items()
+                         if k in accepted and v <= accepted[k] + 1e-6}
+    seams["flagged"] = {k: v for k, v in seams["flagged"].items()
+                        if k not in seams["accepted"]}
+    sm_ok = {k: list(v) for k, v in (qcfg.get("size_mismatches_accepted") or {}).items()}
+    seams["accepted_size_mismatches"] = {
+        k: v for k, v in seams["size_mismatches"].items() if sm_ok.get(k) == list(v)}
+    seams["size_mismatches"] = {k: v for k, v in seams["size_mismatches"].items()
+                                if k not in seams["accepted_size_mismatches"]}
+    seams["pass"] = not seams["flagged"] and not seams["size_mismatches"]
+    return seams
+
+
 def run_qa(mcfg: dict) -> list[dict]:
     """Grid conformity, cross-tile seams, nodata inside the region polygon,
     and a summary of the per-tile merge stats. Returns the check dicts;
@@ -734,20 +754,7 @@ def run_qa(mcfg: dict) -> list[dict]:
     checks.append(qa.check_grid_conformity(tile_paths, spec=spec))
 
     seams = qa.check_seams(tile_paths, spec=spec, cfg=full)
-    accepted = {k: float(v) for k, v in (qcfg.get("seams_accepted") or {}).items()}
-    seams["accepted"] = {k: v for k, v in seams["flagged"].items()
-                         if k in accepted and v <= accepted[k] + 1e-6}
-    seams["flagged"] = {k: v for k, v in seams["flagged"].items()
-                        if k not in seams["accepted"]}
-    # inherent size mismatches (e.g. an 8111-px CUDEM tile beside 8112-px
-    # neighbours) accepted by exact pair and sizes
-    sm_ok = {k: list(v) for k, v in (qcfg.get("size_mismatches_accepted") or {}).items()}
-    seams["accepted_size_mismatches"] = {
-        k: v for k, v in seams["size_mismatches"].items() if sm_ok.get(k) == list(v)}
-    seams["size_mismatches"] = {k: v for k, v in seams["size_mismatches"].items()
-                                if k not in seams["accepted_size_mismatches"]}
-    seams["pass"] = not seams["flagged"] and not seams["size_mismatches"]
-    checks.append(seams)
+    checks.append(apply_seam_acceptance(seams, qcfg))
 
     region = gpd.read_file(prepared_paths(mcfg)["region"], layer="region")
     checks.append(qa.check_basin_nodata(tile_paths, poly=region, cfg=full))
