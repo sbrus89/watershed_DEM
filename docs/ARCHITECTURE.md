@@ -635,7 +635,14 @@ windowed reads of the merged tiles (no basin-scale raster):
   trenched F.E. Walter and Downsville 24–47 m (fixed 2026-11-19; reported as
   `seg_capped_at_dam`). NHD's own dam features (FType 343) miss every large
   Delaware dam, hence NID; 1D depressions > 30 m deep are
-  quarries (never channel); thalweg = bed − 1.5 D, monotone across the
+  quarries (never channel), and the running bed/thalweg level **restarts
+  after a quarry gap** -- carrying it across put the pre-gap level on the
+  first point beyond: on NHDPlus HR reaches that climb a ridge (routing
+  errors, e.g. a connector from the Tioughnioga River up into Castle Creek,
+  NY, that the 1D fill sees as one long pit) the river's thalweg landed on
+  the hilltop (single-pixel holes cut 70-147 m on 6 region-02 tiles) and at
+  pit exits it cut up to ~67 m with no cut cap applied (fixed 2026-11-20,
+  `NETWORK_VERSION` 3); thalweg = bed − 1.5 D, monotone across the
   network. D = 0.4 × regional curve (min 0.05 m), width = STREAM-geo RF
   (halved below 10 km², floor 2 px); tier 1b (big reach, no polygon) uses
   Zarrabi.
@@ -701,7 +708,37 @@ fill pixels burned, volume, deepest tiles, network reports) and, with
 `--connectivity`, ponding on the snapped network before vs after for
 `qa.connectivity_tiles`.
 
-**Known limitations.** Tier-1 depth validated on one river (two reaches);
+**Region-wide check of the tier-2 depth (2026-11-20).** Before the six
+non-Delaware basins were added, observed mean depth at mean annual flow
+(median A/W of USGS channel measurements within 0.5–2× the 1990–2025 mean
+annual Q; ≥ 20 measurements, ≥ 10 years of Q) was compared with each
+gauge's regional curve at 712 gauges
+(`/pscratch/sd/s/sbrus/channel_geom_explore/gauge_cal_r02/`: `fit.py`,
+`fit.out`, `gauges.csv`). Median obs/curve by basin: 0202 0.374, 0203 0.355,
+0204 0.376, 0205 0.343, 0206 0.398, 0207 0.358, 0208 0.404 (log10 sd
+0.09–0.18), so `t2_factor` 0.4 was kept everywhere; it is 0–17 % deep,
+the safe direction for connectivity. Mild drainage-area trend: 0.44 below
+10 km², 0.34–0.38 above 100 km². Two gauges were unretrievable (API 500 on
+every request format): 02024000 Maury R. nr Buena Vista, 01663500 Hazel R.
+at Rixeyville.
+
+**Known limitations.** **Adirondack/Mohawk tier-2 depth is ~25 % too
+shallow (deferred, user decision 2026-11-20):** gauges there give obs/curve
+≈ 0.52 (Adirondack n = 8, Mohawk section n = 7); no Adirondack curve exists,
+so 0202's ~8,200 km² of ADIRONDACK falls to the PA noncarbonate default.
+A fix is a per-province factor override (e.g. 0.5) — a new config key plus
+a `NETWORK_VERSION` bump and a 0202 network rerun. Coastal Plain ratios are
+noisy and diverge (0208 0.56, n = 16; Long Island/0203 0.29, n = 26) and
+were also left at 0.4. HR routing errors that send a large river's drainage area over a
+divide (Tioughnioga -> Castle Creek, TotDASqKm 1,833 on a small creek) are
+not detected: the climbing reach now burns nothing, but the receiving creek
+is sized from the inflated drainage area. A sea-level 0208 reach on the
+Eastern Shore (37.946, -75.945) that burned ~32 m along its whole length
+was the same carry-over (its cap came through a quarry gap): tile max
+32 -> 3.9 m after the fix. Open (not yet investigated): a 38 m tier-1b cut
+on the James near Scottsville (37.758, -78.487), the deepest in region 02;
+48 more tiles have max cuts of 25-34 m, expected to be culverts under road
+fills but not spot-checked. Tier-1 depth validated on one river (two reaches);
 Water Gap tier-2 residual ponding not investigated; no explicit smooth join
 to tidal bathymetry at the head of tide; dams missing from NID (or whose
 NID point is > buffer + half-crest from the crest) can still be cut where a

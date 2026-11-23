@@ -69,7 +69,7 @@ BURN_VERSION = 4
 # The network pass has its own version and ignores parameters only the
 # per-tile apply step uses, so changing what may be lowered re-burns tiles
 # without redoing the (~30 min per basin) network.
-NETWORK_VERSION = 2
+NETWORK_VERSION = 3
 APPLY_ONLY_KEYS = ("burn_id", "burnable_ids", "burnable_outside_water_ids",
                    "t1_surface_tol_m", "t2_lateral_tol_m")
 
@@ -351,7 +351,17 @@ def path_bed(zp: np.ndarray, cap_in: float, pit_deep: float):
     ignored = False
     if cap_in < fill1d[0] - pit_deep:
         cap_in, ignored = np.inf, True
-    bed = np.minimum.accumulate(np.minimum(np.where(quarry, np.inf, zs), cap_in))
+    # The monotone minimum restarts after every quarry gap: carrying the
+    # pre-pit level across it put that level on whatever lies beyond the
+    # gap -- on a reach that climbs a ridge (an HR routing error that is
+    # one long 'pit') that was a hilltop, cut 70-147 m (region 02,
+    # 2026-11-20). The upstream cap applies only to the run starting at 0.
+    bed = np.where(quarry, np.inf, zs).astype("f8")
+    lab, nrun = ndi.label(~quarry)
+    for k in range(1, nrun + 1):
+        idx = np.flatnonzero(lab == k)
+        seg = bed[idx] if idx[0] else np.minimum(bed[idx], cap_in)
+        bed[idx] = np.minimum.accumulate(seg)
     bed = np.where(np.isfinite(bed), bed, zp)
     return bed, quarry, ignored
 
@@ -392,7 +402,9 @@ def thalweg(bed, D, quarry, capped, cap_in: float, pit_deep: float):
     """bed - 1.5 D made monotone across the network (a junction where D
     shrinks downstream must not step up); capped segments keep their
     retained obstruction; quarry points burn nothing (inf) and do not
-    propagate. Returns (thal, cap_ignored)."""
+    propagate: the running level is reset by a quarry gap, so the first
+    point beyond it starts from its own bed (see ``path_bed``). Returns
+    (thal, cap_ignored)."""
     raw = bed - 1.5 * D
     thal = np.empty_like(raw)
     cur, ignored = cap_in, False
@@ -401,6 +413,7 @@ def thalweg(bed, D, quarry, capped, cap_in: float, pit_deep: float):
     for k in range(len(raw)):
         if quarry[k]:
             thal[k] = np.inf
+            cur = np.inf
             continue
         cur = raw[k] if capped[k] else min(cur, raw[k])
         thal[k] = cur

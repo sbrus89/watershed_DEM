@@ -6,8 +6,8 @@
 #   - separate product name + separate output directory
 #   - burned pixels may be lidar (1-3) or residual fill (99); bathymetry
 #     sources (11-15) are never lowered
-#   - Delaware (0204) first; other HUC-4s are added to `basins` once their
-#     inputs are prepared and checked
+#   - Delaware (0204) first; the other six HUC-4s added 2026-11-19 after a
+#     region-wide gauge check of the tier-2 depth model
 # Method and constants come from the scratch prototype v3
 # (/pscratch/sd/s/sbrus/channel_geom_explore/proto/proto.py, 2026-11-17),
 # validated on two EAARL-B reaches of the Delaware mainstem.
@@ -41,6 +41,24 @@ basins:
   - {huc4: "0204",
      hr_gdb: /pscratch/sd/s/sbrus/DE_watershed_DEM/data/raw/nhdplushr/NHDPLUS_H_0204_HU4_GDB.gdb,
      water_mask: /pscratch/sd/s/sbrus/DE_watershed_DEM/data/intermediate/water_mask/water_mask.gpkg}
+  - {huc4: "0206",
+     hr_gdb: /pscratch/sd/s/sbrus/Chesapeake_watershed_DEM/data/raw/nhdplushr/NHDPLUS_H_0206_HU4_GDB.gdb,
+     water_mask: /pscratch/sd/s/sbrus/Chesapeake_watershed_DEM/data/intermediate/water_mask/water_mask.gpkg}
+  - {huc4: "0205",
+     hr_gdb: /pscratch/sd/s/sbrus/Susquehanna_watershed_DEM/data/raw/nhdplushr/NHDPLUS_H_0205_HU4_GDB.gdb,
+     water_mask: /pscratch/sd/s/sbrus/Susquehanna_watershed_DEM/data/intermediate/water_mask/water_mask.gpkg}
+  - {huc4: "0207",
+     hr_gdb: /pscratch/sd/s/sbrus/Potomac_watershed_DEM/data/raw/nhdplushr/NHDPLUS_H_0207_HU4_GDB.gdb,
+     water_mask: /pscratch/sd/s/sbrus/Potomac_watershed_DEM/data/intermediate/water_mask/water_mask.gpkg}
+  - {huc4: "0208",
+     hr_gdb: /pscratch/sd/s/sbrus/LowerChesapeake_watershed_DEM/data/raw/nhdplushr/NHDPLUS_H_0208_HU4_GDB.gdb,
+     water_mask: /pscratch/sd/s/sbrus/LowerChesapeake_watershed_DEM/data/intermediate/water_mask/water_mask.gpkg}
+  - {huc4: "0202",
+     hr_gdb: /pscratch/sd/s/sbrus/UpperHudson_watershed_DEM/data/raw/nhdplushr/NHDPLUS_H_0202_HU4_GDB.gdb,
+     water_mask: /pscratch/sd/s/sbrus/UpperHudson_watershed_DEM/data/intermediate/water_mask/water_mask.gpkg}
+  - {huc4: "0203",
+     hr_gdb: /pscratch/sd/s/sbrus/LowerHudson_watershed_DEM/data/raw/nhdplushr/NHDPLUS_H_0203_HU4_GDB.gdb,
+     water_mask: /pscratch/sd/s/sbrus/LowerHudson_watershed_DEM/data/intermediate/water_mask/water_mask.gpkg}
 
 burn:
   burn_id: 16                   # provenance value of a lowered pixel
@@ -62,6 +80,11 @@ burn:
   t1_sample_m: 15.0
   # tier 2 (and 1b = DA >= t1_da_km2 without a river polygon)
   t2_factor: 0.4                # D = factor x regional bankfull mean-depth curve
+  # Region-wide gauge check 2026-11-20 (712 USGS gauges, obs depth at mean
+  # annual Q / curve): basin medians 0.34-0.40 -> 0.4 kept for all basins.
+  # Deferred: Adirondack/Mohawk gauges ~0.52 (n=8/7; no Adirondack curve, they
+  # fall to the PA noncarbonate default) -> burn ~25% shallow there. See
+  # ARCHITECTURE.md section 12 "Known limitations".
   t2_min_depth_m: 0.05
   t2_narrow_da_km2: 10.0        # below this DA, STREAM-geo RF width is halved
   node_snap_m: 15.0             # junction snapped to lowest px within this

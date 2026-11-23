@@ -66,7 +66,11 @@ def run_tiles(cfg_path, only, nproc):
         log.info("[%d/%d] %s %s", i, len(tiles), tile,
                  f"FAILED {err}" if err else f"{mode} ({n} px lowered)")
     if nproc > 1:
-        pool.close()
+        # Every result is in hand, so nothing is pending: terminate rather
+        # than close()+join().  join() hung 8 h after the last tile in job
+        # 61684422 (a maxtasksperchild replacement worker forked while a lock
+        # was held never reads its shutdown sentinel).
+        pool.terminate()
         pool.join()
     if failed:
         raise SystemExit(f"{len(failed)} tile(s) failed: {failed}")

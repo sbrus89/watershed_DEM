@@ -147,6 +147,38 @@ def test_quarry_is_excluded_and_never_drags_the_bed_down():
     assert ign
 
 
+def test_level_is_not_carried_across_a_quarry_gap():
+    """Catches the 2026-11-20 region-02 bug: the running bed/thalweg level
+    was carried across a quarry gap onto the first point beyond it. On an
+    HR reach that climbs a ridge (Tioughnioga -> Castle Creek, NY: the whole
+    climb is one 'pit') the river's thalweg landed on the hilltop, a single
+    pixel cut 147 m; past a real mid-reach pit the exit was cut to the
+    pre-pit level."""
+    importorskip("scipy")
+    from dem_pipeline.burn import path_bed, thalweg
+    # (a) a reach that runs uphill, 312 -> 431 m, entered with the
+    # downstream river's thalweg cap (283.8 m) at its first node
+    zp = np.linspace(312.0, 431.0, 60)
+    bed, quarry, _ = path_bed(zp, 286.0, pit_deep=30.0)
+    capped = np.zeros(len(zp), bool)
+    thal, _ = thalweg(bed, 0.5, quarry, capped, 283.8, 30.0)
+    burned = np.isfinite(thal)
+    assert quarry[:50].all()                          # the climb is the 'pit'
+    assert (zp[burned] - thal[burned]).max() < 2.0    # was 147 m at the end
+    # (b) a reach that starts in a deep pit (junction on the pit rim) and
+    # exits at 95 -> 90 m, entered with an upstream cap of 80 m: within
+    # pit_deep of the rim, so not discarded as a pit cap -- it must still
+    # not be carried over the pit onto the exit (old: a 15 m thalweg cut
+    # that no cut cap limits)
+    zp = np.r_[100.0, 100.0, np.full(15, 0.0), np.linspace(95, 90, 20)]
+    bed, quarry, ign = path_bed(zp, 80.0, pit_deep=30.0)
+    assert not ign and quarry[2:17].all()
+    thal, ign = thalweg(bed, 0.5, quarry, np.zeros(len(zp), bool), 79.25, 30.0)
+    post = np.flatnonzero(np.isfinite(thal) & (np.arange(len(zp)) >= 17))
+    assert len(post) and (zp[post] - thal[post]).max() < 2.0  # old: 15 m
+    assert (zp[post] - bed[post]).max() < 1.0        # bed not dragged to 80 m
+
+
 def test_uncrossed_deep_cut_is_capped_but_crossing_cut_is_not():
     """Catches: road-embankment (culvert) cuts limited like any other cut,
     or unmapped deep cuts allowed (a trench through a ridge/quarry wall)."""
