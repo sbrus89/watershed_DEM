@@ -220,7 +220,6 @@
           `linear-gradient(to right, ${stops})`;
         document.getElementById("depthLo").textContent = info.lo.toFixed(1);
         document.getElementById("depthHi").textContent = `+${info.hi.toFixed(1)}`;
-        depthLegendEl.hidden = false;
         return info;
       });
     }
@@ -235,6 +234,9 @@
       return;
     }
     ensureDepthLegend().then(() => {
+      // un-hide on every toggle-on: the legend promise is cached, so doing
+      // this inside it only ever ran the first time
+      depthLegendEl.hidden = false;
       if (!depthLayer) {
         depthLayer = L.tileLayer("/api/depth_tile/{z}/{x}/{y}.png", {
           opacity: opacitySlider.value / 100, maxZoom: 18, maxNativeZoom: 15,
