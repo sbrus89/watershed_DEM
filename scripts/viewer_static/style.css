@@ -63,3 +63,8 @@ html, body { height: 100%; margin: 0; font-family: -apple-system, Segoe UI, Robo
 
 .tile-outline { }
 .tile-outline.flagged { }
+#gaugeGradient { height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.25);
+  background: linear-gradient(to right, #2166ac, #67a9cf, #f7f7f7, #ef8a62, #b2182b); }
+.gaugePopup td { padding: 0 6px 0 0; font-size: 12px; }
+#burnGradient { height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.25); }
+.ticks { display: flex; justify-content: space-between; font-size: 11px; color: #444; margin-top: 2px; }

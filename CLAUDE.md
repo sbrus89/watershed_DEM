@@ -46,6 +46,8 @@ python scripts/viewer.py        # interactive QA viewer, http://127.0.0.1:8765/
 python scripts/merge_region.py all --nproc 1   # region-wide merge of basin products (ARCHITECTURE §11)
 python scripts/viewer.py --merge-config config/merge_region02.yaml --port 8778  # view the merged product
 python scripts/burn_region.py all --nproc 4   # optional channel burn of the merged product (ARCHITECTURE §12)
+python scripts/burn_gauge_compare.py --gauges <gauges.csv>   # burn depth vs USGS gauges -> <burn root>/qa/gauge_compare.geojson
+python scripts/viewer.py --burn-config config/burn_region02.yaml --port 8779  # view the burned product + burn-depth + gauge layers
 ```
 
 `scripts/viewer.py` (+ `scripts/viewer_static/`) is a local, read-only Leaflet

@@ -20,6 +20,15 @@ cache directory).
 
 Usage: python scripts/viewer.py [--port 8765] [--host 127.0.0.1]
        python scripts/viewer.py --merge-config config/merge_region02.yaml
+       python scripts/viewer.py --burn-config config/burn_region02.yaml
+
+--burn-config views the channel-burned product (scripts/burn_region.py,
+e.g. config/burn_region02.yaml) the same way, and adds a burn-depth layer:
+original (merged) minus burned elevation, from the per-tile
+<name>_burndepth.tif sidecars (which equal that difference exactly, 0
+where nothing was lowered) -- and, if scripts/burn_gauge_compare.py has
+written <root>/qa/gauge_compare.geojson, a USGS gauge layer (burn model
+depth vs observed mean depth at mean flow).
 
 --merge-config views a region merge (scripts/merge_region.py) instead of
 this checkout's basin product: tiles, mosaic VRT and QA report come from the
@@ -66,7 +75,12 @@ SOURCE_COLORS_BY_NAME = {
     "cudem19": (140, 200, 214), "coned": (190, 225, 232),
     "nos_grids": (96, 72, 180),
     "filled": (220, 40, 40),
+    "burn": (255, 0, 200),
 }
+
+# Burn-depth layer: log colour scale (most cuts are tens of cm, culvert cuts
+# reach tens of m); below BURN_MIN_M is transparent.
+BURN_LO_M, BURN_HI_M, BURN_MIN_M = 0.05, 10.0, 0.01
 
 
 # Set by --merge-config: a config-shaped dict whose paths are absolute
@@ -97,6 +111,32 @@ def _merge_view(cfg_path: str) -> dict:
     }
 
 
+def _burn_view(cfg_path: str) -> dict:
+    """The burned product's view: the merge's tile list/boundary, the burn's
+    output root, and the merged source ids plus the burn id."""
+    from dem_pipeline import burn
+
+    b = burn.load_burn_config(cfg_path)
+    root = burn.out_root(b)
+    p = b["project"]
+    view = _merge_view(b["_merge"]["_path"])
+    ids = {**view["cfg"]["compositing"]["source_ids"],
+           "burn": int(b["burn"]["burn_id"])}
+    view["cfg"] = {
+        "project": {"name": p["name"], "version": p["version"]},
+        "output": {"tile_dir": str(root / "tiles"),
+                   "vrt": str(root / f"{p['name']}_{p['version']}.vrt")},
+        "qa": {"dir": str(root / "qa"), "quicklook_dir": str(root / "quicklooks")},
+        "compositing": {"source_ids": ids},
+    }
+    view["burn"] = True
+    return view
+
+
+def _is_burn() -> bool:
+    return bool(_MERGE and _MERGE.get("burn"))
+
+
 def _cfg():
     return _MERGE["cfg"] if _MERGE else dp.load_config()
 
@@ -113,6 +153,12 @@ def _cache_dir() -> Path:
     d = dp.path(_cfg()["qa"]["quicklook_dir"], ".viewer_cache")
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _burndepth_path(canon: str) -> Path:
+    cfg = _cfg()
+    stem = f"{cfg['project']['name']}_{canon}_{cfg['project']['version']}"
+    return dp.path(cfg["output"]["tile_dir"]) / f"{stem}_burndepth.tif"
 
 
 def _tile_paths(name: str) -> tuple[str, Path, Path]:
@@ -275,6 +321,109 @@ def render_depth(tile_path: Path, max_px: int) -> bytes:
     buf = io.BytesIO()
     img.save(buf, "PNG")
     return buf.getvalue()
+
+
+def _maxpool(a: np.ndarray, f: int) -> np.ndarray:
+    """f x f block maximum (NaN-aware): a few-pixel-wide channel stays visible
+    when shrunk, where averaging with the surrounding zeros would fade it."""
+    h, w = (a.shape[0] // f) * f, (a.shape[1] // f) * f
+    return np.nanmax(a[:h, :w].reshape(h // f, f, w // f, f), axis=(1, 3))
+
+
+def _colorize_burn(d: np.ndarray) -> np.ndarray:
+    import matplotlib
+    from matplotlib.colors import LogNorm
+
+    show = np.isfinite(d) & (d >= BURN_MIN_M)
+    norm = LogNorm(vmin=BURN_LO_M, vmax=BURN_HI_M, clip=True)
+    rgba = matplotlib.colormaps["plasma"](norm(np.where(show, d, BURN_LO_M)))
+    rgb = (rgba[..., :3] * 255).astype("u1")
+    return np.dstack([rgb, np.where(show, 255, 0).astype("u1")])
+
+
+def render_burndepth(path: Path, max_px: int) -> bytes:
+    """One tile's burn depth (original - burned), block-max shrunk."""
+    import rasterio
+    from PIL import Image
+
+    with rasterio.open(path) as src:
+        d = src.read(1).astype("f4")
+        if src.nodata is not None:
+            d[d == src.nodata] = np.nan
+    f = max(1, math.ceil(max(d.shape) / max_px))
+    if f > 1:
+        d = _maxpool(d, f)
+    img = Image.fromarray(_colorize_burn(d), "RGBA")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _burndepth_mosaic_vrt() -> Path | None:
+    """Mosaic of the per-tile burn-depth sidecars (cache dir, rebuilt when
+    the sidecar set changes) -- same approach as _source_mosaic_vrt. Tiles
+    with nothing lowered have no sidecar and read as nodata (= 0 m)."""
+    import subprocess
+
+    cfg = _cfg()
+    tifs = dp.product_tifs(dp.path(cfg["output"]["tile_dir"]),
+                           f"{cfg['project']['name']}_*_burndepth.tif")
+    if not tifs:
+        return None
+    sig = f"{len(tifs)}_{max(p.stat().st_mtime_ns for p in tifs)}"
+    vrt = _cache_dir() / f"burndepth_mosaic_{sig}.vrt"
+    if not vrt.exists():
+        listfile = vrt.with_suffix(".inputs.txt")
+        listfile.write_text("\n".join(str(p) for p in tifs) + "\n")
+        subprocess.run(["gdalbuildvrt", "-q", "-overwrite", "-input_file_list",
+                        str(listfile), str(vrt)], check=True)
+    return vrt
+
+
+def render_burndepth_tile(z: int, x: int, y: int, tile_px: int = 256) -> bytes:
+    """XYZ tile of burn depth: read 4x oversampled (from the sidecars' own
+    overviews) and block-max shrunk, so channels survive zooming out. At low
+    zoom the overviews themselves are averages, so depths read shallower."""
+    import rasterio
+    from PIL import Image
+    from rasterio.enums import Resampling
+    from rasterio.windows import from_bounds
+
+    vrt = _burndepth_mosaic_vrt()
+    if vrt is None:
+        return _transparent_png(tile_px)
+    west, south, east, north = _slippy_tile_bounds(z, x, y)
+    over = 4
+    with rasterio.open(vrt) as src:
+        b = src.bounds
+        if east <= b.left or west >= b.right or north <= b.bottom or south >= b.top:
+            return _transparent_png(tile_px)
+        nodata = src.nodata
+        window = from_bounds(west, south, east, north, transform=src.transform)
+        arr = src.read(1, window=window, out_shape=(tile_px * over, tile_px * over),
+                       resampling=Resampling.average, boundless=True,
+                       fill_value=nodata if nodata is not None else np.nan).astype("f4")
+    if nodata is not None:
+        arr[arr == nodata] = np.nan
+    if not np.any(arr >= BURN_MIN_M):
+        return _transparent_png(tile_px)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN blocks
+        d = _maxpool(arr, over)
+    img = Image.fromarray(_colorize_burn(d), "RGBA")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def burndepth_legend() -> dict:
+    import matplotlib
+
+    cm = matplotlib.colormaps["plasma"]
+    stops = [[round(p * 100, 1), "#%02x%02x%02x" % tuple(int(c * 255) for c in cm(p)[:3])]
+             for p in np.linspace(0, 1, 11)]
+    return {"lo": BURN_LO_M, "hi": BURN_HI_M, "stops": stops}
 
 
 @lru_cache(maxsize=4)
@@ -541,7 +690,8 @@ class Handler(BaseHTTPRequestHandler):
                 cfg = _cfg()
                 self._send_json({"name": cfg["project"]["name"],
                                  "version": cfg["project"]["version"],
-                                 "legend": source_legend()})
+                                 "legend": source_legend(),
+                                 "burn": _is_burn()})
             elif path == "/api/tiles.geojson":
                 self._send_json(build_tiles_geojson())
             elif path == "/api/basin_boundary.geojson":
@@ -561,6 +711,19 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": "no provenance rasters found"}, 404)
                 else:
                     self._send_json(source_legend())
+            elif path == "/api/burndepth_legend":
+                if not _is_burn() or _burndepth_mosaic_vrt() is None:
+                    self._send_json({"error": "no burn-depth rasters"}, 404)
+                else:
+                    self._send_json(burndepth_legend())
+            elif path == "/api/gauges.geojson":
+                gp = dp.path(_cfg()["qa"]["dir"]) / "gauge_compare.geojson"
+                if not (_is_burn() and gp.exists()):
+                    self._send_json({"error": "run scripts/burn_gauge_compare.py first"}, 404)
+                else:
+                    self._send(200, gp.read_bytes(), "application/json")
+            elif path.startswith("/api/burndepth_tile/"):
+                self._handle_burndepth_tile(path)
             elif path.startswith("/api/depth_tile/"):
                 self._handle_depth_tile(path)
             elif path.startswith("/api/source_tile/"):
@@ -609,8 +772,37 @@ class Handler(BaseHTTPRequestHandler):
             png = _cached_png(hashlib.sha1(key.encode()).hexdigest(),
                               lambda: render_depth(tile_path, max_px))
             self._send(200, png, "image/png")
+        elif kind == "burndepth.png":
+            bd = _burndepth_path(canon)
+            if not (_is_burn() and bd.exists()):
+                self._send_json({"error": f"nothing burned on {canon}"}, 404)
+                return
+            key = f"{canon}_burn_{max_px}_{bd.stat().st_mtime_ns}"
+            png = _cached_png(hashlib.sha1(key.encode()).hexdigest(),
+                              lambda: render_burndepth(bd, max_px))
+            self._send(200, png, "image/png")
         else:
             self._send_json({"error": "unknown resource"}, 404)
+
+    def _handle_burndepth_tile(self, path: str):
+        # /api/burndepth_tile/<z>/<x>/<y>.png
+        parts = path.split("/")
+        if len(parts) != 6 or not parts[5].endswith(".png"):
+            self._send_json({"error": "bad path"}, 404)
+            return
+        try:
+            z, x, y = int(parts[3]), int(parts[4]), int(parts[5][:-4])
+        except ValueError:
+            self._send_json({"error": "bad tile coordinates"}, 400)
+            return
+        vrt = _burndepth_mosaic_vrt() if _is_burn() else None
+        if vrt is None:
+            self._send_json({"error": "no burn-depth rasters"}, 404)
+            return
+        key = f"burn_{z}_{x}_{y}_{vrt.stat().st_mtime_ns}"
+        png = _cached_png(hashlib.sha1(key.encode()).hexdigest(),
+                          lambda: render_burndepth_tile(z, x, y))
+        self._send(200, png, "image/png")
 
     def _handle_depth_tile(self, path: str):
         # /api/depth_tile/<z>/<x>/<y>.png
@@ -663,11 +855,18 @@ def main() -> None:
     ap.add_argument("--merge-config", default=None,
                     help="view a region merge (e.g. config/merge_region02.yaml) "
                          "instead of this checkout's basin product")
+    ap.add_argument("--burn-config", default=None,
+                    help="view a channel-burned product (e.g. "
+                         "config/burn_region02.yaml), with a burn-depth layer")
     args = ap.parse_args()
     dp.setup_logging()
     global _MERGE
+    if args.burn_config and args.merge_config:
+        ap.error("--burn-config and --merge-config are exclusive")
     if args.merge_config:
         _MERGE = _merge_view(args.merge_config)
+    elif args.burn_config:
+        _MERGE = _burn_view(args.burn_config)
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"DE watershed DEM viewer running at http://{args.host}:{args.port}/")

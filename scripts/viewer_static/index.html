@@ -36,6 +36,33 @@
       <input type="range" id="sourcesOpacitySlider" min="0" max="100" value="70">
       <span id="sourcesOpacityLabel">70%</span>
     </div>
+    <div id="burnControls" hidden>
+      <label class="row">
+        <input type="checkbox" id="burnToggle">
+        burn depth (original &minus; burned)
+      </label>
+      <div class="row" id="burnOpacityRow" hidden>
+        <input type="range" id="burnOpacitySlider" min="0" max="100" value="90">
+        <span id="burnOpacityLabel">90%</span>
+      </div>
+      <div id="burnLegend" hidden>
+        <div id="burnGradient" class="gradient"></div>
+        <div class="ticks"><span>0.05</span><span>0.3</span><span>1.7</span><span>10+</span></div>
+        <div class="legendCaption">m lowered (log scale)</div>
+      </div>
+    </div>
+    <div id="gaugeControls" hidden>
+      <label class="row">
+        <input type="checkbox" id="gaugeToggle">
+        USGS gauges: burn depth vs observed
+      </label>
+      <div id="gaugeLegend" hidden>
+        <div id="gaugeGradient" class="gradient"></div>
+        <div class="ticks"><span>&frac12;&times;</span><span>1</span><span>2&times;</span></div>
+        <div class="legendCaption">model D / observed mean depth</div>
+        <div class="legendCaption">hollow grey: not burned there</div>
+      </div>
+    </div>
     <div id="legend"></div>
   </div>
 
@@ -47,6 +74,7 @@
     <div id="panelTabs">
       <button class="tabBtn active" data-tab="hillshade">hillshade</button>
       <button class="tabBtn" data-tab="depth">depth</button>
+      <button class="tabBtn" data-tab="burndepth" id="burnTab" hidden>burn depth</button>
     </div>
     <label class="row">
       <input type="checkbox" id="sourceOverlayToggle">
