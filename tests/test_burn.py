@@ -26,7 +26,7 @@ PARAMS = dict(burn_id=16, burnable_ids=[1, 2, 3, 99], burnable_outside_water_ids
               node_snap_m=15.0, snap_corridor_m=40.0, window_margin_m=60.0,
               cut_cap_m=2.0, crossing_buffer_m=15.0, pit_deep_m=30.0,
               max_nan_frac=0.2, dam_buffer_m=150.0, t1_surface_tol_m=2.0,
-              t2_lateral_tol_m=2.0)
+              t2_lateral_tol_m=2.0, conduit_ftypes=[334, 428], conduit_max_m=300.0)
 
 
 def _spec():
@@ -99,9 +99,10 @@ def _lines(L, cols=(25, 98), row=40):
     (xa, xb), (ya, yb) = L.xy([row, row], list(cols))
     return gpd.GeoDataFrame(
         {"NHDPlusID": [1], "FromNode": [10], "ToNode": [11], "HydroSeq": [5],
-         "TotDASqKm": [20.0], "mf_depth": [np.nan], "mf_width": [np.nan],
+         "TotDASqKm": [20.0], "DivDASqKm": [20.0], "DA": [20.0],
+         "mf_depth": [np.nan], "mf_width": [np.nan],
          "RF_Width_m": [8.0], "bf_c": [0.204], "bf_e": [0.321], "GNIS_Name": ["x"],
-         "in_lake": [False]},
+         "in_lake": [False], "conduit": [False]},
         geometry=[shapely.LineString([(xa, ya), (xb, yb)])], crs=4269)
 
 
@@ -382,6 +383,84 @@ def test_tier2_lateral_guard_spares_high_ground_but_keeps_the_4connected_core():
 
 # ------------------------------------------------------------ network pass
 
+def test_attach_ml_takes_divda_only_where_it_matches_v21():
+    """Catches the 2026-11-23 region-02 bug: HR TotDASqKm routes the
+    Delaware (16,900 km2) through the D&R Canal into the Millstone, so no
+    V2.1 reach matched, the river got no Zarrabi depth and burned nothing --
+    and the over-correction of using DivDASqKm everywhere, which shrinks
+    braids/marsh creeks where V2.1 (and TotDASqKm) is right."""
+    importorskip("geopandas")
+    import geopandas as gpd
+    import shapely
+    from dem_pipeline.burn import attach_ml
+
+    def line(k):                        # parallel lines 5 km apart
+        x = -75.0 + 0.06 * k
+        return shapely.LineString([(x, 40.0), (x, 40.01)])
+
+    #           canal-inflated     braid (minor)      normal          no V2.1 near
+    tot = [16905.0, 300.0, 300.0, 50.0]
+    div = [650.0, 5.0, 300.0, 50.0]
+    fl = gpd.GeoDataFrame({"NHDPlusID": [1, 2, 3, 4], "TotDASqKm": tot, "DivDASqKm": div},
+                          geometry=[line(k) for k in range(4)], crs=4269)
+    ml = gpd.GeoDataFrame({"COMID": [11, 12, 13], "TotDASqKM": [680.0, 310.0, 310.0],
+                           "mf_depth": [1.2, 1.0, 1.0], "mf_width": [30.0, 25.0, 25.0],
+                           "RF_Width_m": [28.0, 24.0, 24.0], "Tidal_Flag": [0, 0, 0]},
+                          geometry=[line(k) for k in range(3)], crs=4269)
+    out = attach_ml(fl, ml, 26918).set_index("NHDPlusID")
+    assert out.loc[1, "DA"] == 650.0 and out.loc[1, "COMID"] == 11   # Div matched
+    assert np.isfinite(out.loc[1, "mf_depth"])
+    assert out.loc[2, "DA"] == 300.0 and out.loc[2, "COMID"] == 12   # Tot kept
+    assert out.loc[3, "DA"] == 300.0
+    assert out.loc[4, "DA"] == 50.0 and np.isnan(out.loc[4, "mf_depth"])
+
+
+def test_network_line_mask_keeps_short_conduits_only():
+    """Catches the 2026-11-23 road-crossing gaps: NHD culverts (connector
+    334 / pipeline 428) were dropped, so the burn stopped at every culvert
+    inlet and the embankment dammed the reach (6 m ponds on Plymouth Creek);
+    and the over-reach of routing long conduits (buried streams, 54 km
+    aqueducts) as surface trenches, or out-of-network lines."""
+    import pandas as pd
+    from dem_pipeline.burn import Params, network_line_mask
+    P = Params.from_config({"burn": dict(PARAMS)})
+    fl = pd.DataFrame({"FType": [460, 558, 334, 428, 334, 428, 336, 460],
+                       "LengthKM": [1.0, 0.2, 0.012, 0.04, 1.5, 54.0, 0.5, 1.0],
+                       "InNetwork": [1, 1, 1, 1, 1, 1, 1, 0]})
+    assert network_line_mask(fl, P).tolist() == [True, True, True, True,
+                                                 False, False, False, False]
+
+
+def test_tier1_depth_is_never_nan():
+    """Catches: a tier-1 reach whose DA window holds no Zarrabi depth
+    getting D = NaN, which rasterizes to nothing (the Raritan went unburned
+    silently); and a fallback that also overrides reaches that have one."""
+    import pandas as pd
+    from dem_pipeline.burn import Params, tier1_depth
+    P = Params.from_config({"burn": dict(PARAMS)})
+    t1p = pd.DataFrame({"DA": [500.0, 520.0, 5000.0], "mf_depth": [1.0, np.nan, np.nan],
+                        "bf_c": [0.204] * 3, "bf_e": [0.321] * 3})
+    D, n_fb = tier1_depth(t1p, P)
+    assert np.isfinite(D).all() and n_fb == 1
+    assert D[0] == D[1] == 0.5                         # smoothed from the neighbour
+    assert abs(D[2] - 0.4 * 0.204 * 5000 ** 0.321) < 1e-9   # regional-curve fallback
+
+
+def test_split_specs_refuses_non_finite_depth():
+    """Catches: a NaN depth or width reaching a spec file (it would lower
+    nothing, with no error anywhere downstream)."""
+    from dem_pipeline.burn import split_specs
+    L = _lattice()
+    p = dict(id=7, I=np.array([10, 11]), J=np.array([10, 11]), thal=np.zeros(2, "f4"),
+             D=float("nan"), Wd=5.0, lat=40.0)
+    with raises(ValueError):
+        split_specs(L, None, [p], 500.0)
+    t1 = {"I": np.array([10]), "J": np.array([10]), "wse": np.array([1.0], "f4"),
+          "D": np.array([np.nan], "f4")}
+    with raises(ValueError):
+        split_specs(L, t1, [], 500.0)
+
+
 def test_tier2_network_caps_unmapped_embankment_and_cuts_at_road(tmp_path):
     """Catches: the culvert rule inverted or ignored end-to-end (deep cut
     without a mapped crossing / no cut at a road), and a bed that is not
@@ -409,6 +488,12 @@ def test_tier2_network_caps_unmapped_embankment_and_cuts_at_road(tmp_path):
     _, cuts_d = tier2_network(net, fl, None)
     assert cuts_d.n_seg_at_dam.iloc[0] == 1 and cuts_d.n_seg_at_crossing.iloc[0] == 0
     assert cuts_d.max_cut.iloc[0] <= 2.0 + 1e-6
+    # a mapped culvert (short NHD connector) is its own crossing: no road
+    fl_c = fl.assign(conduit=[True])
+    net = _net(tmp_path, L, paths)
+    _, cuts_c = tier2_network(net, fl_c, None)
+    assert cuts_c.n_seg_capped.iloc[0] == 0 and cuts_c.n_seg_at_crossing.iloc[0] == 1
+    assert cuts_c.max_cut.iloc[0] > 3.5
     thal = p2[0]["thal"]
     assert np.all(np.diff(thal) <= 1e-5)
     assert np.all(np.abs(p2[0]["I"] - 40) <= 1)       # snapped to the valley floor

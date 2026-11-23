@@ -609,11 +609,12 @@ Method and constants are the scratch prototype v3
 (`/pscratch/sd/s/sbrus/channel_geom_explore/proto/proto.py`), validated on
 two EAARL-B mainstem reaches (Hancock, Water Gap).
 
-**Inputs.** NHDPlus HR flowlines (FType 460/558, in-network, DA ≥ 1 km²,
-tidal reaches per STREAM-geo `Tidal_Flag` skipped); Zarrabi et al. 2025
-mean-flow depth/width and STREAM-geo RF width, carried from NHDPlusV2.1
-COMIDs onto HR lines by a 200 m / DA-ratio match (`prepare` →
-`prep/<huc4>/ml.gpkg`); USGS physiographic sections → regional bankfull
+**Inputs.** NHDPlus HR flowlines (in-network FType 460/558, plus
+connector/pipeline conduits 334/428 ≤ `conduit_max_m` 300 m -- see below;
+DA ≥ 1 km², tidal reaches per STREAM-geo `Tidal_Flag` skipped); Zarrabi et
+al. 2025 mean-flow depth/width and STREAM-geo RF width, carried from
+NHDPlusV2.1 COMIDs onto HR lines by a 200 m / DA-ratio match (`prepare` →
+`prep/<huc4>/ml.gpkg`; see *Drainage area* below); USGS physiographic sections → regional bankfull
 mean-depth curves (`curves:` in the config); TIGER roads (all counties
 touching the basin) + rails (`prep/<huc4>/roads.gpkg`); USACE National
 Inventory of Dams points + crest length (`prep/<huc4>/dams.gpkg`, from the
@@ -646,6 +647,31 @@ windowed reads of the merged tiles (no basin-scale raster):
   network. D = 0.4 × regional curve (min 0.05 m), width = STREAM-geo RF
   (halved below 10 km², floor 2 px); tier 1b (big reach, no polygon) uses
   Zarrabi.
+- *Drainage area* (fixed 2026-11-23, `NETWORK_VERSION` 4). HR's
+  `TotDASqKm` routes whole basins through canals: the Delaware's
+  ~16,900 km² goes down the D&R Canal into the Millstone (true ~650 km²)
+  and Raritan, so no V2.1 reach matched within 2×, the rivers got no
+  Zarrabi depth, tier-1 D was NaN on 19 % of 0203's samples and those
+  reaches burned nothing, silently; Royce Brook (40 km²) was treated as a
+  big river. `DivDASqKm` (divergence-routed, always ≤ Tot) is right there
+  but NOT in general: on lines where the two differ by > 2×, the nearest
+  V2.1 reach sides with Tot 71–89 % per basin (braids, marsh creeks), with
+  Div only 4–13 %. So `attach_ml` accepts a V2.1 match if EITHER field is
+  within 2× and the field that matched becomes the effective `DA` (unmatched
+  lines keep Tot); `DA` drives the da_min cut, the tier split, tier-1
+  smoothing and tier-2 depth/width. A tier-1 reach with no Zarrabi depth in
+  its DA window falls back to the tier-2 curve (`depth_fallback_reaches` in
+  the report), and `split_specs` refuses any non-finite D/Wd/wse.
+- *Culverts* (fixed 2026-11-23, same version). NHD HR maps most culverts as
+  Connector (334) or Pipeline (428) lines; routing only 460/558 dropped
+  them, so the burn stopped at every culvert inlet and the embankment
+  dammed the reach above (Plymouth Creek, PA: 5–6 m ponds; ~11,100 such
+  gaps fed by the burned network in region 02, 94 % ≤ 300 m; 0204/0203
+  median connector 12–14 m). In-network conduits ≤ `conduit_max_m` are now
+  routed like streams and count as a crossing (deep cut allowed without a
+  TIGER road; the dam keep-out still wins). Longer ones -- buried streams
+  in 0205/0202 (connector median 77–218 m, up to 5.5 km), aqueducts up to
+  54 km -- still get no surface trench and still break the network.
 - Output: `spec/<huc4>/<tile>.npz` in **global lattice pixel coordinates**
   plus `manifests/network_<huc4>.json` (fingerprint, per-tile spec digests,
   report). Tier-2 reach table: `prep/<huc4>/tier2_reaches.csv`.
@@ -732,7 +758,12 @@ noisy and diverge (0208 0.56, n = 16; Long Island/0203 0.29, n = 26) and
 were also left at 0.4. HR routing errors that send a large river's drainage area over a
 divide (Tioughnioga -> Castle Creek, TotDASqKm 1,833 on a small creek) are
 not detected: the climbing reach now burns nothing, but the receiving creek
-is sized from the inflated drainage area. A sea-level 0208 reach on the
+is sized from the inflated drainage area -- the 2026-11-23 effective-DA
+fix does not help here (V2.1 is inflated the same way; likewise the Erie
+Canal/Mohawk). Embankments with no mapped crossing (no TIGER road/rail
+within 15 m, no NHD conduit -- private roads, abandoned rail grades, small
+unlisted dams) stay capped at 2 m and keep ponding by design, e.g. a 5 m
+fill at 40.0849, -75.2824. A sea-level 0208 reach on the
 Eastern Shore (37.946, -75.945) that burned ~32 m along its whole length
 was the same carry-over (its cap came through a quarry gap): tile max
 32 -> 3.9 m after the fix. Open (not yet investigated): a 38 m tier-1b cut

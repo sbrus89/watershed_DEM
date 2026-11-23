@@ -92,6 +92,13 @@ burn:
   window_margin_m: 60.0
   cut_cap_m: 2.0                # deeper cuts need a mapped road/rail crossing
   crossing_buffer_m: 15.0
+  # Short NHD HR conduits -- Connector (334) / Pipeline (428) lines no longer
+  # than conduit_max_m -- are mapped culverts: routed like streams and treated
+  # as a crossing (deep cut allowed). Excluding them broke the burn at ~11,000
+  # road crossings region-wide (2026-11-23). Longer ones (buried streams,
+  # aqueducts up to 54 km) stay out.
+  conduit_ftypes: [334, 428]
+  conduit_max_m: 300.0
   # A deep (> cut_cap) tier-2 cut touching an NID dam keep-out is capped even
   # where a road crosses -- dam crests carry roads (F.E. Walter, Downsville
   # were trenched 24-47 m before this). Radius = dam_buffer_m + half the NID

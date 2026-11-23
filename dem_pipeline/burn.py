@@ -21,8 +21,10 @@ A. ``run_network`` (per HUC-4, vector + windowed reads, no basin raster):
      HR line is snapped to the valley bottom by a least-cost path, given a
      downstream-monotone (cut-only) bed and thalweg = bed - 1.5 D; cuts deeper
      than cut_cap need a mapped road/rail crossing (culvert) and must not
-     touch an NID dam keep-out buffer (a dam crest carries a road too); 1D
-     depressions deeper than pit_deep (quarries) are never channel.
+     touch an NID dam keep-out buffer (a dam crest carries a road too); a
+     short NHD conduit (connector / pipeline <= conduit_max_m: a mapped
+     culvert) is itself a crossing; 1D depressions deeper than pit_deep
+     (quarries) are never channel.
    The result is split into per-tile burn specs (spec/<huc4>/<tile>.npz) in
    global lattice coordinates, so two tiles sharing a collar rasterize the
    same path identically.
@@ -69,7 +71,7 @@ BURN_VERSION = 4
 # The network pass has its own version and ignores parameters only the
 # per-tile apply step uses, so changing what may be lowered re-burns tiles
 # without redoing the (~30 min per basin) network.
-NETWORK_VERSION = 3
+NETWORK_VERSION = 4
 APPLY_ONLY_KEYS = ("burn_id", "burnable_ids", "burnable_outside_water_ids",
                    "t1_surface_tol_m", "t2_lateral_tol_m")
 
@@ -160,12 +162,16 @@ class Params:
     dam_buffer_m: float
     t1_surface_tol_m: float
     t2_lateral_tol_m: float
+    conduit_ftypes: tuple = (334, 428)
+    conduit_max_m: float = 300.0
 
     @classmethod
     def from_config(cls, b: dict) -> "Params":
         d = dict(b["burn"])
         d["burnable_ids"] = tuple(int(i) for i in d["burnable_ids"])
         d["wse_ids"] = tuple(int(i) for i in d["wse_ids"])
+        if "conduit_ftypes" in d:
+            d["conduit_ftypes"] = tuple(int(i) for i in d["conduit_ftypes"])
         d["burnable_outside_water_ids"] = tuple(
             int(i) for i in d.get("burnable_outside_water_ids") or ())
         return cls(**d)
@@ -661,19 +667,36 @@ def _box(x0, y0, x1, y1):
     return shapely.box(x0, y0, x1, y1)
 
 
+def network_line_mask(fl, P) -> np.ndarray:
+    """In-network HR lines the burn routes: streams (460), artificial paths
+    (558) and short conduits -- connectors / pipelines (P.conduit_ftypes) no
+    longer than P.conduit_max_m, i.e. mapped culverts. Dropping those broke
+    the network at road crossings: the burn stopped at the culvert inlet and
+    the embankment dammed the reach above (Plymouth Creek, PA, 6 m ponds;
+    ~11,000 such gaps in region 02, 94 % of them <= 300 m). Longer conduits
+    are buried streams / aqueducts and get no surface trench."""
+    ft = fl.FType.to_numpy()
+    conduit = np.isin(ft, P.conduit_ftypes) & (fl.LengthKM.to_numpy() * 1e3 <= P.conduit_max_m)
+    return (np.isin(ft, (460, 558)) | conduit) & (fl.InNetwork.to_numpy() == 1)
+
+
 def load_lines(net: Net):
-    """In-network stream/canal HR flowlines with VAA, DA >= da_min, lake flag."""
+    """In-network HR flowlines (network_line_mask) with VAA, DA >= da_min,
+    lake flag and ``conduit`` flag."""
     import geopandas as gpd
     import pandas as pd
     gdb = net.bas["hr_gdb"]
     fl = gpd.read_file(gdb, layer="NHDFlowline",
                        columns=["NHDPlusID", "FType", "WBArea_Permanent_Identifier",
-                                "GNIS_Name", "InNetwork"])
-    fl = fl[fl.FType.isin([460, 558]) & (fl.InNetwork == 1)]
+                                "GNIS_Name", "InNetwork", "LengthKM"])
+    fl = fl[network_line_mask(fl, net.P)].copy()
+    fl["conduit"] = fl.FType.isin(net.P.conduit_ftypes)
     vaa = gpd.read_file(gdb, layer="NHDPlusFlowlineVAA", read_geometry=False,
                         columns=["NHDPlusID", "FromNode", "ToNode", "HydroSeq",
-                                 "TotDASqKm", "StreamOrde", "Divergence"])
+                                 "TotDASqKm", "DivDASqKm", "StreamOrde", "Divergence"])
     fl = fl.merge(pd.DataFrame(vaa), on="NHDPlusID")
+    # superset: the effective DA (attach_ml) is <= TotDASqKm, and the
+    # da_min cut is applied to it in run_network
     fl = fl[fl.TotDASqKm >= net.P.da_min_km2].copy()
     fl["geometry"] = fl.geometry.force_2d().line_merge(directed=True)
     fl = fl[fl.geometry.geom_type == "LineString"].to_crs(4269)
@@ -685,17 +708,33 @@ def load_lines(net: Net):
 
 
 def attach_ml(fl, ml, metric_epsg: int):
-    """Copy V2.1 ML attributes onto HR flowlines: V2.1 reaches within 200 m,
-    drainage-area ratio within [0.5, 2], closest DA wins."""
+    """Copy V2.1 ML attributes onto HR flowlines and set the effective
+    drainage area ``DA`` used everywhere downstream.
+
+    A V2.1 reach within 200 m matches if EITHER HR drainage area --
+    TotDASqKm or the divergence-routed DivDASqKm -- is within [0.5, 2] of
+    its DA; the closest wins, and the HR field that matched becomes DA.
+    Unmatched lines keep TotDASqKm. Why both: HR's TotDASqKm routes whole
+    basins through canals (the Delaware's 16,000 km2 through the D&R Canal
+    into the Millstone/Raritan: no V2.1 match, so no Zarrabi depth and the
+    rivers went unburned), where DivDASqKm is right; but on most lines
+    where the two disagree (braids, marsh creeks) V2.1 sides with
+    TotDASqKm (71-89 % region 02), so DivDASqKm is not used blindly."""
     import geopandas as gpd
     cols = ["COMID", "mf_depth", "mf_width", "RF_Width_m", "Tidal_Flag"]
-    a = fl[["NHDPlusID", "TotDASqKm", "geometry"]].to_crs(metric_epsg)
+    a = fl[["NHDPlusID", "TotDASqKm", "DivDASqKm", "geometry"]].to_crs(metric_epsg)
     v = ml[["TotDASqKM", "geometry"] + cols].to_crs(metric_epsg)
     v["geometry"] = v.buffer(200)
     j = gpd.sjoin(a, v, predicate="intersects")
-    j["lr"] = np.abs(np.log(j.TotDASqKm / j.TotDASqKM.clip(lower=1e-3)))
+    ref = j.TotDASqKM.clip(lower=1e-3)
+    lt = np.abs(np.log(j.TotDASqKm.clip(lower=1e-3) / ref))
+    ld = np.abs(np.log(j.DivDASqKm.clip(lower=1e-3) / ref))
+    j["lr"] = np.minimum(lt, ld)
+    j["DA"] = np.where(ld < lt, j.DivDASqKm, j.TotDASqKm)
     j = j[j.lr < np.log(2)].sort_values("lr").drop_duplicates("NHDPlusID")
-    return fl.merge(j[["NHDPlusID"] + cols], on="NHDPlusID", how="left")
+    out = fl.merge(j[["NHDPlusID", "DA"] + cols], on="NHDPlusID", how="left")
+    out["DA"] = out.DA.fillna(out.TotDASqKm)
+    return out
 
 
 def curve_for(province, section, curves: list[dict]) -> tuple[float, float]:
@@ -740,11 +779,38 @@ def _corridor_poly(polys, lines, corridor_m, metric_epsg):
     return shapely.make_valid(hit.geometry.union_all().intersection(buf))
 
 
+def tier2_depth(da, bf_c, bf_e, P) -> np.ndarray:
+    """Tier-2 mean depth: t2_factor x regional bankfull curve, floored."""
+    return np.maximum(P.t2_factor * np.asarray(bf_c, "f8") * np.asarray(da, "f8")
+                      ** np.asarray(bf_e, "f8"), P.t2_min_depth_m)
+
+
+def tier1_depth(t1p, P) -> tuple[np.ndarray, int]:
+    """Tier-1 mean depth D per reach and the number of fallback reaches.
+
+    D = t1_zarrabi_factor x median Zarrabi depth over tier-1 reaches with DA
+    within +-25 % (smoothed along the network). Where no such reach has a
+    Zarrabi depth, D falls back to the tier-2 regional curve -- never NaN: a
+    NaN D silently burned nothing (19 % of 0203's tier-1 samples, the
+    Raritan/Millstone, before the DA fix)."""
+    da = t1p.DA.to_numpy(dtype="f8")
+    mf = t1p.mf_depth.to_numpy(dtype="f8")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        sm = np.array([np.nanmedian(mf[(da / x >= 0.8) & (da / x <= 1.25)])
+                       for x in da]) if len(da) else np.zeros(0)
+    D = P.t1_zarrabi_factor * sm
+    fb = ~np.isfinite(D)
+    if fb.any():
+        D[fb] = tier2_depth(da[fb], t1p.bf_c.to_numpy()[fb], t1p.bf_e.to_numpy()[fb], P)
+    return D, int(fb.sum())
+
+
 def tier1_network(net: Net, fl, polys):
     """Tier-1 water-surface samples. Returns dict or None."""
     import shapely
     P = net.P
-    t1 = fl[(fl.TotDASqKm >= P.t1_da_km2) & ~fl.in_lake]
+    t1 = fl[(fl.DA >= P.t1_da_km2) & ~fl.in_lake]
     if t1.empty:
         return None
     gm = t1.to_crs(net.metric).geometry
@@ -761,16 +827,9 @@ def tier1_network(net: Net, fl, polys):
     # piece around a non-tier-1 reach never borrows a far tier-1 surface.
     cpoly = _corridor_poly(polys, t1p, P.t1_corridor_m, net.metric)
     shapely.prepare(cpoly)
-    # depth smoothed along the network: median Zarrabi over reaches with DA
-    # within +-25%
-    da = t1p.TotDASqKm.to_numpy()
-    mf = t1p.mf_depth.to_numpy(dtype="f8")
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        sm = np.array([np.nanmedian(mf[(da / x >= 0.8) & (da / x <= 1.25)])
-                       for x in da]) if len(da) else np.array([])
-    t1p["D"] = P.t1_zarrabi_factor * sm
-    net.report["tier1"] = {"reaches": int(len(t1)), "in_polygon": int(len(t1p))}
+    t1p["D"], n_fb = tier1_depth(t1p, P)
+    net.report["tier1"] = {"reaches": int(len(t1)), "in_polygon": int(len(t1p)),
+                           "depth_fallback_reaches": n_fb}
     if t1p.empty:
         return {"I": np.zeros(0, "i8"), "J": np.zeros(0, "i8"),
                 "wse": np.zeros(0, "f4"), "D": np.zeros(0, "f4"),
@@ -896,6 +955,8 @@ def tier2_network(net: Net, fl, t1):
         xing = {}
 
         def at_crossing(idx):
+            if r.conduit:           # a mapped culvert is its own crossing
+                return True
             if "m" not in xing:
                 xing["m"] = net.crossing(R0, R1, C0, C1, lat_r[k])
             return bool(xing["m"][path[idx, 0], path[idx, 1]].any())
@@ -909,12 +970,13 @@ def tier2_network(net: Net, fl, t1):
         bed, capped, n_capped, n_x, n_dam = cap_uncrossed_cuts(
             zp, bed, at_crossing, P.cut_cap_m, at_dam)
         cap[r.ToNode] = min(cap.get(r.ToNode, np.inf), bed[-1])
-        if r.TotDASqKm >= P.t1_da_km2 and np.isfinite(r.mf_depth):   # tier 1b
+        if (r.DA >= P.t1_da_km2 and np.isfinite(r.mf_depth)
+                and np.isfinite(r.mf_width)):                               # tier 1b
             D, Wd, tier = P.t1_zarrabi_factor * r.mf_depth, r.mf_width, "1b"
         else:
-            D = float(max(P.t2_factor * r.bf_c * r.TotDASqKm ** r.bf_e, P.t2_min_depth_m))
+            D = float(tier2_depth(r.DA, r.bf_c, r.bf_e, P))
             wrf = r.RF_Width_m if np.isfinite(r.RF_Width_m) else 0.0
-            if r.TotDASqKm < P.t2_narrow_da_km2:
+            if r.DA < P.t2_narrow_da_km2:
                 wrf *= 0.5
             Wd, tier = max(2 * pxm, wrf), "2"
         thal, ign = thalweg(bed, D, quarry, capped, capT.get(r.FromNode, np.inf), P.pit_deep_m)
@@ -924,10 +986,11 @@ def tier2_network(net: Net, fl, t1):
         paths.append(dict(id=int(r.NHDPlusID), I=pr.astype("i8"), J=pc.astype("i8"),
                           thal=thal.astype("f4"), D=float(D), Wd=float(Wd),
                           lat=float(lat_r[k])))
-        cuts.append(dict(NHDPlusID=int(r.NHDPlusID), tier=tier, da=float(r.TotDASqKm),
+        cuts.append(dict(NHDPlusID=int(r.NHDPlusID), tier=tier, da=float(r.DA),
                          name=r.GNIS_Name, max_cut=float(cut.max()),
                          max_cut_uncapped=cut0max, n_seg_capped=n_capped,
                          n_seg_at_crossing=n_x, n_seg_at_dam=n_dam, length_m=float(len(pr) * pxm),
+                         conduit=bool(r.conduit),
                          lon_max=float(net.L.xy(pr[cut.argmax()], pc[cut.argmax()])[0]),
                          lat_max=float(net.L.xy(pr[cut.argmax()], pc[cut.argmax()])[1])))
     cuts = pd.DataFrame(cuts)
@@ -939,6 +1002,7 @@ def tier2_network(net: Net, fl, t1):
         seg_capped=int(cuts.n_seg_capped.sum()) if len(cuts) else 0,
         seg_deep_cut_at_crossing=int(cuts.n_seg_at_crossing.sum()) if len(cuts) else 0,
         seg_capped_at_dam=int(cuts.n_seg_at_dam.sum()) if len(cuts) else 0,
+        conduits_routed=int(cuts.conduit.sum()) if len(cuts) else 0,
         quarry_px_skipped=nq_px, quarry_caps_ignored=int(nq_cap))
     return paths, cuts
 
@@ -960,8 +1024,15 @@ def path_margin_px(Wd: float, lat: float, res: float) -> int:
 
 def split_specs(L: Lattice, t1: dict | None, paths: list[dict],
                 corridor_m: float) -> dict[str, dict]:
-    """Per-tile spec dicts (only tiles something touches)."""
+    """Per-tile spec dicts (only tiles something touches). Refuses a NaN
+    depth/width or water surface: rasterizing one lowers nothing, silently."""
     import shapely
+    if t1 is not None and not (np.isfinite(t1["D"]).all() and np.isfinite(t1["wse"]).all()):
+        raise ValueError(f"tier-1 spec has {int((~np.isfinite(t1['D'])).sum())} non-finite "
+                         f"D and {int((~np.isfinite(t1['wse'])).sum())} non-finite wse samples")
+    bad = [p["id"] for p in paths if not (np.isfinite(p["D"]) and np.isfinite(p["Wd"]))]
+    if bad:
+        raise ValueError(f"{len(bad)} tier-2 paths with non-finite D/Wd, e.g. {bad[:5]}")
     dmin = pixel_m(L.res, 60.0)[0]          # conservative (small) px size
     pad_poly = int(np.ceil((corridor_m + 100.0) / dmin))
     pad_pts = int(np.ceil((2 * corridor_m + 100.0) / dmin))
@@ -1055,6 +1126,9 @@ def run_network(b: dict, huc4: str | None = None, force: bool = False) -> None:
         net.dams = dam_buffers(gpd.read_file(d / "dams.gpkg"), net.P.dam_buffer_m, net.metric)
         fl = load_lines(net)
         fl = attach_ml(fl, gpd.read_file(d / "ml.gpkg"), net.metric)
+        n_da = int((fl.DA < fl.TotDASqKm).sum())
+        fl = fl[fl.DA >= net.P.da_min_km2].reset_index(drop=True)
+        net.report["da_from_divda"] = n_da
         fl = attach_curve(fl, b["data"]["physio_shp"], b["curves"])
         n_tidal = int((fl.Tidal_Flag == 1).sum())
         if net.P.skip_tidal:
