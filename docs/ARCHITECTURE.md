@@ -734,6 +734,23 @@ fill pixels burned, volume, deepest tiles, network reports) and, with
 `--connectivity`, ponding on the snapped network before vs after for
 `qa.connectivity_tiles`.
 
+**Depth sources** (`burn_region.py sources`, also run by `all`):
+`qa/depth_source/<huc4>.gpkg`, one row per network reach with `src` =
+where its mean depth D came from (`burn.DEPTH_SOURCES`: tier-1 Zarrabi,
+tier-1 curve fallback, tier 1b Zarrabi, tier-2 curve with `curve_idx`, or
+not burned: `not_routed` / `lake` / `tidal`), plus D, width, effective DA
+(`da_from_div`), raw Zarrabi depth, curve, physio section, conduit flag and
+the path's max cut. QA/viewer only -- it never feeds the burn. It is
+recomputed from the network's own vector steps (`network_lines`,
+`select_tier1`, `tier2_section`, shared with `run_network`; ~1 min per
+basin, no rasters), so it refuses to build against a stale network
+manifest, takes "routed" from `tier2_reaches.csv`, and hard-fails if a
+routed reach's recomputed tier disagrees with the network's. Caveat: a
+tier-1 polygon reach with < 2 valid water-surface samples is listed as
+tier 1 though it laid no samples. `viewer.py --burn-config` draws it as
+the "channels: burn depth source" layer (server-rendered XYZ tiles; streams
+< 300 km² appear as you zoom in; click a channel for its attributes).
+
 **Region-wide check of the tier-2 depth (2026-11-20).** Before the six
 non-Delaware basins were added, observed mean depth at mean annual flow
 (median A/W of USGS channel measurements within 0.5–2× the 1990–2025 mean

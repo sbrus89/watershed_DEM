@@ -51,6 +51,17 @@
         <div class="legendCaption">m lowered (log scale)</div>
       </div>
     </div>
+    <div id="dsrcControls" hidden>
+      <label class="row">
+        <input type="checkbox" id="dsrcToggle">
+        channels: burn depth source
+      </label>
+      <div class="row" id="dsrcOpacityRow" hidden>
+        <input type="range" id="dsrcOpacitySlider" min="0" max="100" value="100">
+        <span id="dsrcOpacityLabel">100%</span>
+      </div>
+      <div id="dsrcLegend" hidden></div>
+    </div>
     <div id="gaugeControls" hidden>
       <label class="row">
         <input type="checkbox" id="gaugeToggle">

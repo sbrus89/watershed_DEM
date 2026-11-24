@@ -737,15 +737,26 @@ def attach_ml(fl, ml, metric_epsg: int):
     return out
 
 
-def curve_for(province, section, curves: list[dict]) -> tuple[float, float]:
+def curve_index(province, section, curves: list[dict]) -> int:
+    """Index of the first curve matching PROVINCE / SECTION."""
     p, s = str(province).upper(), str(section).upper()
-    for c in curves:
+    for i, c in enumerate(curves):
         if "province" in c and c["province"].upper() not in p:
             continue
         if "section" in c and c["section"].upper() not in s:
             continue
-        return float(c["c"]), float(c["e"])
+        return i
     raise ValueError("curves: no default entry (one with neither province nor section)")
+
+
+def curve_for(province, section, curves: list[dict]) -> tuple[float, float]:
+    c = curves[curve_index(province, section, curves)]
+    return float(c["c"]), float(c["e"])
+
+
+def curve_label(c: dict) -> str:
+    """Short name of a curves entry, e.g. 'PLATEAU / CATSKILL'."""
+    return " / ".join(c[k] for k in ("province", "section") if k in c) or "default"
 
 
 def attach_curve(fl, physio_shp, curves):
@@ -758,10 +769,11 @@ def attach_curve(fl, physio_shp, curves):
     j = gpd.sjoin(mid, ph[["PROVINCE", "SECTION", "geometry"]], how="left",
                   predicate="within")
     j = j[~j.index.duplicated()].reindex(fl.index)
-    ce = [curve_for(p, s, curves) for p, s in zip(j.PROVINCE, j.SECTION)]
+    ci = [curve_index(p, s, curves) for p, s in zip(j.PROVINCE, j.SECTION)]
     fl = fl.copy()
-    fl["bf_c"] = [c for c, _ in ce]
-    fl["bf_e"] = [e for _, e in ce]
+    fl["curve_idx"] = ci
+    fl["bf_c"] = [float(curves[i]["c"]) for i in ci]
+    fl["bf_e"] = [float(curves[i]["e"]) for i in ci]
     fl["physio"] = j.SECTION.values
     return fl
 
@@ -785,8 +797,8 @@ def tier2_depth(da, bf_c, bf_e, P) -> np.ndarray:
                       ** np.asarray(bf_e, "f8"), P.t2_min_depth_m)
 
 
-def tier1_depth(t1p, P) -> tuple[np.ndarray, int]:
-    """Tier-1 mean depth D per reach and the number of fallback reaches.
+def _tier1_depth(t1p, P) -> tuple[np.ndarray, np.ndarray]:
+    """Tier-1 mean depth D per reach and the mask of fallback reaches.
 
     D = t1_zarrabi_factor x median Zarrabi depth over tier-1 reaches with DA
     within +-25 % (smoothed along the network). Where no such reach has a
@@ -803,11 +815,21 @@ def tier1_depth(t1p, P) -> tuple[np.ndarray, int]:
     fb = ~np.isfinite(D)
     if fb.any():
         D[fb] = tier2_depth(da[fb], t1p.bf_c.to_numpy()[fb], t1p.bf_e.to_numpy()[fb], P)
+    return D, fb
+
+
+def tier1_depth(t1p, P) -> tuple[np.ndarray, int]:
+    """Tier-1 mean depth D per reach and the number of fallback reaches
+    (see _tier1_depth)."""
+    D, fb = _tier1_depth(t1p, P)
     return D, int(fb.sum())
 
 
-def tier1_network(net: Net, fl, polys):
-    """Tier-1 water-surface samples. Returns dict or None."""
+def select_tier1(net: Net, fl, polys):
+    """Tier-1 reaches: (candidates t1, reaches inside a river polygon t1p --
+    with mean depth ``D`` and ``D_fallback`` -- and the corridor polygon).
+    Vector-only (no rasters): shared by tier1_network and depth_sources.
+    Returns None when the basin has no tier-1 candidate."""
     import shapely
     P = net.P
     t1 = fl[(fl.DA >= P.t1_da_km2) & ~fl.in_lake]
@@ -827,9 +849,19 @@ def tier1_network(net: Net, fl, polys):
     # piece around a non-tier-1 reach never borrows a far tier-1 surface.
     cpoly = _corridor_poly(polys, t1p, P.t1_corridor_m, net.metric)
     shapely.prepare(cpoly)
-    t1p["D"], n_fb = tier1_depth(t1p, P)
+    t1p["D"], t1p["D_fallback"] = _tier1_depth(t1p, P)
+    return t1, t1p, cpoly
+
+
+def tier1_network(net: Net, fl, polys):
+    """Tier-1 water-surface samples. Returns dict or None."""
+    P = net.P
+    sel = select_tier1(net, fl, polys)
+    if sel is None:
+        return None
+    t1, t1p, cpoly = sel
     net.report["tier1"] = {"reaches": int(len(t1)), "in_polygon": int(len(t1p)),
-                           "depth_fallback_reaches": n_fb}
+                           "depth_fallback_reaches": int(t1p.D_fallback.sum())}
     if t1p.empty:
         return {"I": np.zeros(0, "i8"), "J": np.zeros(0, "i8"),
                 "wse": np.zeros(0, "f4"), "D": np.zeros(0, "f4"),
@@ -870,6 +902,22 @@ def tier1_network(net: Net, fl, polys):
     res["cpoly"], res["ids"] = cpoly, set(t1p.NHDPlusID)
     net.report["tier1"]["samples"] = int(len(res["I"]))
     return res
+
+
+def tier2_section(r, P, pxm: float) -> tuple[float, float, str]:
+    """(mean depth D, width Wd, tier) of a routed non-tier-1 reach: tier 1b
+    (DA >= t1_da_km2 with a Zarrabi match) = t1_zarrabi_factor x the
+    reach's own Zarrabi depth/width; else tier 2 = t2_factor x regional
+    curve depth, STREAM-geo RF width (halved below t2_narrow_da_km2,
+    floored at 2 px)."""
+    if (r.DA >= P.t1_da_km2 and np.isfinite(r.mf_depth)
+            and np.isfinite(r.mf_width)):
+        return P.t1_zarrabi_factor * r.mf_depth, r.mf_width, "1b"
+    D = float(tier2_depth(r.DA, r.bf_c, r.bf_e, P))
+    wrf = r.RF_Width_m if np.isfinite(r.RF_Width_m) else 0.0
+    if r.DA < P.t2_narrow_da_km2:
+        wrf *= 0.5
+    return D, max(2 * pxm, wrf), "2"
 
 
 def tier2_network(net: Net, fl, t1):
@@ -970,15 +1018,7 @@ def tier2_network(net: Net, fl, t1):
         bed, capped, n_capped, n_x, n_dam = cap_uncrossed_cuts(
             zp, bed, at_crossing, P.cut_cap_m, at_dam)
         cap[r.ToNode] = min(cap.get(r.ToNode, np.inf), bed[-1])
-        if (r.DA >= P.t1_da_km2 and np.isfinite(r.mf_depth)
-                and np.isfinite(r.mf_width)):                               # tier 1b
-            D, Wd, tier = P.t1_zarrabi_factor * r.mf_depth, r.mf_width, "1b"
-        else:
-            D = float(tier2_depth(r.DA, r.bf_c, r.bf_e, P))
-            wrf = r.RF_Width_m if np.isfinite(r.RF_Width_m) else 0.0
-            if r.DA < P.t2_narrow_da_km2:
-                wrf *= 0.5
-            Wd, tier = max(2 * pxm, wrf), "2"
+        D, Wd, tier = tier2_section(r, P, pxm)
         thal, ign = thalweg(bed, D, quarry, capped, capT.get(r.FromNode, np.inf), P.pit_deep_m)
         nq_cap += ign
         capT[r.ToNode] = min(capT.get(r.ToNode, np.inf), thal[-1])
@@ -1102,6 +1142,26 @@ def _huc_tiles(b, bas, spec, tiles, polys=None):
     return sel
 
 
+def network_lines(net: Net):
+    """The network pass's vector inputs (no rasters): (burnable lines with
+    effective DA, curve and ML attrs; the tidal lines skip_tidal removed;
+    the basin's NHD water polygons)."""
+    import geopandas as gpd
+    b, bas = net.b, net.bas
+    d = prep_dir(b, str(bas["huc4"]))
+    fl = load_lines(net)
+    fl = attach_ml(fl, gpd.read_file(d / "ml.gpkg"), net.metric)
+    n_da = int((fl.DA < fl.TotDASqKm).sum())
+    fl = fl[fl.DA >= net.P.da_min_km2].reset_index(drop=True)
+    net.report["da_from_divda"] = n_da
+    fl = attach_curve(fl, b["data"]["physio_shp"], b["curves"])
+    tidal = fl[fl.Tidal_Flag == 1] if net.P.skip_tidal else fl.iloc[:0]
+    fl = fl.drop(tidal.index).reset_index(drop=True)
+    wp = gpd.read_file(bas["water_mask"], layer="water").to_crs(4269)
+    wp["geometry"] = wp.geometry.force_2d()
+    return fl, tidal.reset_index(drop=True), wp
+
+
 def run_network(b: dict, huc4: str | None = None, force: bool = False) -> None:
     import geopandas as gpd
     spec, tiles = load_input(b)
@@ -1124,20 +1184,10 @@ def run_network(b: dict, huc4: str | None = None, force: bool = False) -> None:
         net = Net(b, bas, L, M)
         net.roads = gpd.read_file(d / "roads.gpkg")
         net.dams = dam_buffers(gpd.read_file(d / "dams.gpkg"), net.P.dam_buffer_m, net.metric)
-        fl = load_lines(net)
-        fl = attach_ml(fl, gpd.read_file(d / "ml.gpkg"), net.metric)
-        n_da = int((fl.DA < fl.TotDASqKm).sum())
-        fl = fl[fl.DA >= net.P.da_min_km2].reset_index(drop=True)
-        net.report["da_from_divda"] = n_da
-        fl = attach_curve(fl, b["data"]["physio_shp"], b["curves"])
-        n_tidal = int((fl.Tidal_Flag == 1).sum())
-        if net.P.skip_tidal:
-            fl = fl[fl.Tidal_Flag != 1].reset_index(drop=True)
+        fl, tidal, wp = network_lines(net)
         log.info("%s: %d HR flowlines (%d with ML attrs, %d tidal %s)", huc, len(fl),
-                 int(fl.COMID.notna().sum()), n_tidal,
+                 int(fl.COMID.notna().sum()), len(tidal),
                  "skipped" if net.P.skip_tidal else "kept")
-        wp = gpd.read_file(bas["water_mask"], layer="water").to_crs(4269)
-        wp["geometry"] = wp.geometry.force_2d()
         t1 = tier1_network(net, fl, wp)
         log.info("%s: tier1 %s", huc, net.report.get("tier1"))
         paths, cuts = tier2_network(net, fl, t1)
@@ -1162,6 +1212,113 @@ def run_network(b: dict, huc4: str | None = None, force: bool = False) -> None:
         _atomic_json(mp, {"fingerprint": fp, "huc4": huc, "tiles": digests,
                           "report": net.report})
         log.info("%s: network done, specs for %d tiles", huc, len(specs))
+
+
+# ----- per-reach depth sources (QA / viewer; never feeds the burn)
+
+# What a reach's burn depth D came from (``src`` in depth_sources output).
+DEPTH_SOURCES = {
+    "t1_zarrabi": "tier 1 (river polygon): t1_zarrabi_factor x Zarrabi "
+                  "mean-flow depth, median over reaches of similar DA",
+    "t1_curve": "tier 1 (river polygon): no Zarrabi depth within DA +-25 % "
+                "-> t2_factor x regional curve (fallback)",
+    "t1b_zarrabi": "tier 1b (DA >= t1_da_km2, outside a river polygon): "
+                   "t1_zarrabi_factor x the reach's own Zarrabi depth",
+    "t2_curve": "tier 2: t2_factor x regional bankfull curve (curve_idx)",
+    "not_routed": "not burned: no least-cost path (void window / unsnapped node)",
+    "lake": "not burned: artificial path through a lake / reservoir",
+    "tidal": "not burned: tidal reach (bathymetry's job)",
+}
+
+
+def depth_source_path(b: dict, huc4: str) -> Path:
+    return out_root(b) / "qa" / "depth_source" / f"{huc4}.gpkg"
+
+
+def depth_sources(b: dict, huc4: str | None = None, force: bool = False) -> None:
+    """Per-reach table of where each burned channel's depth came from
+    (DEPTH_SOURCES), one GPKG per HUC-4 under <root>/qa/depth_source/.
+
+    Recomputed from the network's own vector steps (network_lines,
+    select_tier1, tier2_section -- the same functions run_network uses, no
+    rasters), so it can only be built against a CURRENT network: refuses
+    if the manifest fingerprint is stale. Whether a non-tier-1 reach was
+    routed comes from the network's tier2_reaches.csv, and the routed
+    reaches' tier there must agree with the recomputed one (hard error:
+    the layer would misreport the burn)."""
+    import geopandas as gpd
+    import pandas as pd
+    import shapely
+    spec, tiles = load_input(b)
+    L = Lattice(spec, tiles)
+    polys = _huc4_polygons(b)
+    curves = b["curves"]
+    for bas in b["basins"]:
+        huc = str(bas["huc4"])
+        if huc4 and huc != str(huc4):
+            continue
+        fp = network_fingerprint(b, bas, L, _huc_tiles(b, bas, spec, tiles, polys))
+        mp = network_manifest(b, huc)
+        if not mp.exists() or json.loads(mp.read_text()).get("fingerprint") != fp:
+            raise SystemExit(f"{huc}: network not current -- run the 'network' step first")
+        out = depth_source_path(b, huc)
+        side = out.with_suffix(".json")
+        if (not force and out.exists() and side.exists()
+                and json.loads(side.read_text()).get("fingerprint") == fp):
+            log.info("%s: depth sources up to date", huc)
+            continue
+        net = Net(b, bas, L, None)
+        fl, tidal, wp = network_lines(net)
+        P = net.P
+        sel = select_tier1(net, fl, wp)
+        t1p = sel[1] if sel is not None else fl.iloc[:0].assign(D=[], D_fallback=[])
+        cuts = pd.read_csv(prep_dir(b, huc) / "tier2_reaches.csv",
+                           dtype={"tier": str})
+        routed = cuts.set_index("NHDPlusID")
+        lat = shapely.get_y(shapely.centroid(fl.geometry.values))
+        src, D, W, tier = [], [], [], []
+        D1 = dict(zip(t1p.NHDPlusID, zip(t1p.D, t1p.D_fallback)))
+        for k, r in enumerate(fl.itertuples()):
+            if r.NHDPlusID in D1:
+                d, fb = D1[r.NHDPlusID]
+                src.append("t1_curve" if fb else "t1_zarrabi")
+                D.append(float(d)); W.append(np.nan); tier.append("1")
+                continue
+            if r.in_lake:
+                src.append("lake"); D.append(np.nan); W.append(np.nan); tier.append("")
+                continue
+            dx, dy = pixel_m(L.res, lat[k])
+            d, w, t = tier2_section(r, P, 0.5 * (dx + dy))
+            if r.NHDPlusID not in routed.index:
+                src.append("not_routed"); D.append(float(d)); W.append(float(w))
+                tier.append(t)
+                continue
+            if str(routed.at[r.NHDPlusID, "tier"]) != t:
+                raise RuntimeError(f"{huc}: reach {r.NHDPlusID} recomputed tier {t} != "
+                                   f"network tier {routed.at[r.NHDPlusID, 'tier']}")
+            src.append("t1b_zarrabi" if t == "1b" else "t2_curve")
+            D.append(float(d)); W.append(float(w)); tier.append(t)
+        fl = fl.assign(src=src, D=D, W=W, tier=tier)
+        tidal = tidal.assign(src="tidal", D=np.nan, W=np.nan, tier="")
+        g = pd.concat([fl, tidal], ignore_index=True)
+        mc = routed.max_cut.reindex(g.NHDPlusID).to_numpy()
+        g = gpd.GeoDataFrame({
+            "huc4": huc, "NHDPlusID": g.NHDPlusID.astype("int64"),
+            "name": g.GNIS_Name.fillna(""), "src": g.src, "tier": g.tier,
+            "D": g.D.astype("f4"), "W": g.W.astype("f4"),
+            "DA": g.DA.astype("f4"), "TotDASqKm": g.TotDASqKm.astype("f4"),
+            "da_from_div": (g.DA < g.TotDASqKm).to_numpy(),
+            "zarrabi_mf_depth": g.mf_depth.astype("f4"),
+            "curve_idx": g.curve_idx.astype("int16"),
+            "curve": [curve_label(curves[i]) for i in g.curve_idx],
+            "physio": g.physio.fillna(""), "conduit": g.conduit.astype(bool),
+            "max_cut": mc.astype("f4")}, geometry=g.geometry.values, crs=fl.crs)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        _write_gpkg(g, out)
+        counts = {k: int(v) for k, v in g.src.value_counts().items()}
+        _atomic_json(side, {"fingerprint": fp, "huc4": huc, "counts": counts,
+                            "curves": [dict(c, label=curve_label(c)) for c in curves]})
+        log.info("%s: depth sources %s -> %s", huc, counts, out)
 
 
 def load_specs(b: dict, tile: str) -> dict[str, dict]:

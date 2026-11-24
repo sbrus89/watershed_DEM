@@ -446,6 +446,87 @@ def test_tier1_depth_is_never_nan():
     assert abs(D[2] - 0.4 * 0.204 * 5000 ** 0.321) < 1e-9   # regional-curve fallback
 
 
+def test_tier2_section_picks_tier_and_width():
+    """Catches: tier 1b losing its Zarrabi depth/width (or taking it below
+    t1_da_km2), the narrow-stream width halving or the 2-px floor dropped."""
+    import pandas as pd
+    from dem_pipeline.burn import Params, tier2_section
+    P = Params.from_config({"burn": dict(PARAMS)})
+
+    def row(DA, mf_depth=np.nan, mf_width=np.nan, rf=8.0):
+        return pd.Series({"DA": DA, "mf_depth": mf_depth, "mf_width": mf_width,
+                          "RF_Width_m": rf, "bf_c": 0.204, "bf_e": 0.321})
+    assert tier2_section(row(500.0, 1.4, 40.0), P, 3.0) == (0.7, 40.0, "1b")
+    D, Wd, t = tier2_section(row(50.0, 1.4, 40.0), P, 3.0)    # small: curve, not ML
+    assert t == "2" and abs(D - 0.4 * 0.204 * 50 ** 0.321) < 1e-9 and Wd == 8.0
+    assert tier2_section(row(5.0), P, 3.0)[1] == 6.0           # 8/2 = 4 < 2 px
+    assert tier2_section(row(5.0, rf=20.0), P, 3.0)[1] == 10.0  # halved
+    assert tier2_section(row(500.0, rf=np.nan), P, 3.0)[1:] == (6.0, "2")
+
+
+def _depth_source_case(tmp_path, monkeypatch, fp="fp", csv_tier4="2"):
+    """depth_sources on a planted 6-reach network (+1 tidal) with the
+    network's vector steps stubbed."""
+    import geopandas as gpd
+    import pandas as pd
+    import shapely
+    from dem_pipeline import burn
+    b = _cfg(tmp_path)
+    b["curves"] = [{"province": "COASTAL", "c": 0.269, "e": 0.273}, {"c": 0.204, "e": 0.321}]
+    ids = [1, 2, 3, 4, 5, 6]
+    geom = [shapely.LineString([(-75.0 + 0.01 * k, 40.0), (-75.0 + 0.01 * k, 40.01)])
+            for k in range(7)]
+    fl = gpd.GeoDataFrame({
+        "NHDPlusID": ids, "GNIS_Name": ["a", "b", "c", "d", "e", None],
+        "in_lake": [False, False, False, False, True, False],
+        "DA": [800.0, 900.0, 500.0, 20.0, 300.0, 5.0],
+        "TotDASqKm": [800.0, 9000.0, 500.0, 20.0, 300.0, 5.0],
+        "mf_depth": [2.0, np.nan, 1.4, np.nan, np.nan, np.nan],
+        "mf_width": [50.0, np.nan, 40.0, np.nan, np.nan, np.nan],
+        "RF_Width_m": [50.0, 60.0, 40.0, 8.0, 30.0, 4.0],
+        "bf_c": [0.204] * 6, "bf_e": [0.321] * 6, "curve_idx": [1] * 6,
+        "physio": ["P"] * 6, "conduit": [False, False, False, True, False, False]},
+        geometry=geom[:6], crs=4269)
+    tidal = fl.iloc[:1].assign(NHDPlusID=7, geometry=[geom[6]], curve_idx=0)
+    t1p = fl.iloc[:2].assign(D=[1.0, 0.9], D_fallback=[False, True])
+    monkeypatch.setattr(burn, "load_input", lambda b: (_spec(), [TA, TB]))
+    monkeypatch.setattr(burn, "_huc4_polygons", lambda b: {})
+    monkeypatch.setattr(burn, "_huc_tiles", lambda *a, **k: [])
+    monkeypatch.setattr(burn, "network_fingerprint", lambda *a: fp)
+    monkeypatch.setattr(burn, "network_lines", lambda net: (fl, tidal, None))
+    monkeypatch.setattr(burn, "select_tier1", lambda net, fl, wp: (fl.iloc[:2], t1p, None))
+    d = burn.prep_dir(b, "0204")
+    d.mkdir(parents=True)
+    pd.DataFrame({"NHDPlusID": [3, 4], "tier": ["1b", csv_tier4],
+                  "max_cut": [0.5, 7.25]}).to_csv(d / "tier2_reaches.csv", index=False)
+    mp = burn.network_manifest(b, "0204")
+    mp.parent.mkdir(parents=True, exist_ok=True)
+    mp.write_text(json.dumps({"fingerprint": "fp"}))
+    burn.depth_sources(b, force=True)
+    return gpd.read_file(burn.depth_source_path(b, "0204")).set_index("NHDPlusID")
+
+
+def test_depth_sources_reports_each_reach_and_refuses_a_mismatched_network(tmp_path,
+                                                                          monkeypatch):
+    """Catches: the viewer layer misreporting where a burn depth came from
+    -- tier-1 fallbacks shown as Zarrabi, unrouted reaches shown as burned,
+    the culvert/max-cut attributes lost -- and the layer being built
+    against a stale network or one whose tiers disagree with it."""
+    importorskip("geopandas")
+    g = _depth_source_case(tmp_path, monkeypatch)
+    assert g.src.to_dict() == {1: "t1_zarrabi", 2: "t1_curve", 3: "t1b_zarrabi",
+                               4: "t2_curve", 5: "lake", 6: "not_routed", 7: "tidal"}
+    assert g.loc[1, "D"] == 1.0 and abs(g.loc[3, "D"] - 0.7) < 1e-6
+    assert abs(g.loc[4, "D"] - 0.4 * 0.204 * 20 ** 0.321) < 1e-6
+    assert g.loc[4, "max_cut"] == 7.25 and bool(g.loc[4, "conduit"])
+    assert bool(g.loc[2, "da_from_div"]) and not bool(g.loc[1, "da_from_div"])
+    assert g.loc[7, "curve"] == "COASTAL" and g.loc[1, "curve"] == "default"
+    with raises(SystemExit):                      # stale network
+        _depth_source_case(tmp_path / "s", monkeypatch, fp="newer")
+    with raises(RuntimeError):                    # tier disagrees with the network
+        _depth_source_case(tmp_path / "m", monkeypatch, csv_tier4="1b")
+
+
 def test_split_specs_refuses_non_finite_depth():
     """Catches: a NaN depth or width reaching a spec file (it would lower
     nothing, with no error anywhere downstream)."""

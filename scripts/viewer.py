@@ -28,7 +28,11 @@ original (merged) minus burned elevation, from the per-tile
 <name>_burndepth.tif sidecars (which equal that difference exactly, 0
 where nothing was lowered) -- and, if scripts/burn_gauge_compare.py has
 written <root>/qa/gauge_compare.geojson, a USGS gauge layer (burn model
-depth vs observed mean depth at mean flow).
+depth vs observed mean depth at mean flow) -- and, if `burn_region.py
+sources` has written <root>/qa/depth_source/<huc4>.gpkg, a channel layer
+coloured by where each reach's burn depth came from (tier 1 Zarrabi /
+curve fallback / tier 1b / tier-2 regional curve; click a channel for its
+D, width, drainage area, curve).
 
 --merge-config views a region merge (scripts/merge_region.py) instead of
 this checkout's basin product: tiles, mosaic VRT and QA report come from the
@@ -130,6 +134,11 @@ def _burn_view(cfg_path: str) -> dict:
         "compositing": {"source_ids": ids},
     }
     view["burn"] = True
+    view["depth_source"] = [burn.depth_source_path(b, str(bas["huc4"]))
+                            for bas in b["basins"]]
+    view["curves"] = [burn.curve_label(c) + f" ({c['c']}·DA^{c['e']})"
+                      for c in b["curves"]]
+    view["factors"] = {"t1": b["burn"]["t1_zarrabi_factor"], "t2": b["burn"]["t2_factor"]}
     return view
 
 
@@ -424,6 +433,170 @@ def burndepth_legend() -> dict:
     stops = [[round(p * 100, 1), "#%02x%02x%02x" % tuple(int(c * 255) for c in cm(p)[:3])]
              for p in np.linspace(0, 1, 11)]
     return {"lo": BURN_LO_M, "hi": BURN_HI_M, "stops": stops}
+
+
+# ---- channel depth-source layer (burned product only) --------------------
+#
+# Vector layer from <root>/qa/depth_source/<huc4>.gpkg (scripts/burn_region.py
+# sources): every network reach coloured by where its burn depth D came
+# from. Drawn server-side into XYZ PNGs (~400k reaches region-wide: too many
+# for GeoJSON in the browser), small streams dropped at low zoom; clicks are
+# answered by /api/reach_at.
+
+DS_COLORS = {
+    "t1_zarrabi": (0, 229, 255), "t1b_zarrabi": (47, 123, 255),
+    "t1_curve": (255, 45, 85),
+    "not_routed": (255, 255, 255), "lake": (130, 130, 140), "tidal": (90, 90, 100),
+}
+# tier-2 regional curves, by position in the burn config's curves list
+DS_CURVE_COLORS = [(255, 214, 10), (255, 149, 0), (163, 230, 53), (52, 211, 153),
+                   (233, 213, 255), (255, 120, 200), (180, 140, 90)]
+DS_LABELS = {      # {t1} / {t2}: the burn config's depth factors
+    "t1_zarrabi": "tier 1 river: {t1} × Zarrabi mean-flow depth",
+    "t1b_zarrabi": "tier 1b (no river polygon): {t1} × Zarrabi",
+    "t1_curve": "tier 1 river: no Zarrabi match → {t2} × regional curve",
+    "not_routed": "not burned: no path routed",
+    "lake": "not burned: lake / reservoir",
+    "tidal": "not burned: tidal (bathymetry)",
+}
+_DS = {"lock": __import__("threading").Lock(), "data": None, "sig": None}
+
+
+def _ds_label(key: str) -> str:
+    f = _MERGE["factors"]
+    if key.startswith("t2_curve:"):
+        return f"tier 2: {f['t2']} × curve {_MERGE['curves'][int(key.split(':')[1])]}"
+    return DS_LABELS.get(key, key).format(**f)
+
+
+def _ds_files() -> list[Path]:
+    return [p for p in (_MERGE or {}).get("depth_source", []) if p.exists()]
+
+
+def _ds_key(src: str, curve_idx: int) -> str:
+    return f"t2_curve:{curve_idx}" if src == "t2_curve" else src
+
+
+def _ds_color(key: str) -> tuple:
+    if key.startswith("t2_curve:"):
+        return DS_CURVE_COLORS[int(key.split(":")[1]) % len(DS_CURVE_COLORS)]
+    return DS_COLORS.get(key, (255, 0, 255))
+
+
+def _ds_data():
+    """All basins' reaches (loaded once; reloaded if a gpkg changes)."""
+    files = _ds_files()
+    sig = tuple((str(p), p.stat().st_mtime_ns) for p in files)
+    with _DS["lock"]:
+        if _DS["data"] is None or _DS["sig"] != sig:
+            import geopandas as gpd
+            import pandas as pd
+            import shapely
+            if not files:
+                return None
+            g = pd.concat([gpd.read_file(p) for p in files], ignore_index=True)
+            g = gpd.GeoDataFrame(g, geometry="geometry", crs=4269)
+            g["key"] = [_ds_key(a, int(b)) for a, b in zip(g.src, g.curve_idx)]
+            burned = ~g.src.isin(["lake", "tidal", "not_routed"])
+            # draw order: not-burned first, then small to large
+            g = g.assign(_o=burned.astype(int) * 1e7 + g.DA).sort_values("_o")
+            g = g.reset_index(drop=True)
+            _DS["data"] = {"g": g, "tree": shapely.STRtree(g.geometry.values),
+                           "burned": (~g.src.isin(["lake", "tidal", "not_routed"])).to_numpy(),
+                           "da": g.DA.to_numpy()}
+            _DS["sig"] = sig
+            log.info("depth-source layer: %d reaches from %d files", len(g), len(files))
+        return _DS["data"]
+
+
+def _ds_da_min(z: int) -> float:
+    return {8: 300.0, 9: 100.0, 10: 30.0, 11: 10.0, 12: 3.0}.get(
+        z, 1000.0 if z < 8 else 0.0)
+
+
+def render_depthsrc_tile(z: int, x: int, y: int, tile_px: int = 256) -> bytes:
+    import shapely
+    from PIL import Image, ImageDraw
+
+    d = _ds_data()
+    west, south, east, north = _slippy_tile_bounds(z, x, y)
+    pad = (east - west) * 0.05
+    idx = d["tree"].query(shapely.box(west - pad, south - pad, east + pad, north + pad))
+    idx = np.sort(idx[d["da"][idx] >= _ds_da_min(z)])     # sorted = draw order
+    if not len(idx):
+        return _transparent_png(tile_px)
+    ss = 2                                     # supersample, then shrink
+    n = 2.0 ** z * 256 * ss
+    g = d["g"]
+    coords, part = shapely.get_coordinates(g.geometry.values[idx], return_index=True)
+    px = (coords[:, 0] + 180.0) / 360.0 * n - x * 256 * ss
+    lat = np.radians(np.clip(coords[:, 1], -85, 85))
+    py = (1 - np.log(np.tan(lat) + 1 / np.cos(lat)) / math.pi) / 2 * n - y * 256 * ss
+    img = Image.new("RGBA", (tile_px * ss, tile_px * ss), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    base = 1.0 if z <= 10 else 1.5 if z <= 12 else 2.5 if z <= 14 else 3.5
+    cuts = np.flatnonzero(np.diff(part)) + 1
+    for j, (a, b) in enumerate(zip(np.r_[0, cuts], np.r_[cuts, len(part)])):
+        k = idx[j]
+        if b - a < 2:
+            continue
+        w = base * (1.0 if d["burned"][k] else 0.6) * (1.6 if d["da"][k] >= 100 else 1.0)
+        draw.line(list(zip(px[a:b], py[a:b])), fill=_ds_color(g.key.iat[k]) + (255,),
+                  width=max(1, int(round(w * ss))), joint="curve")
+    img = img.resize((tile_px, tile_px), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def depthsrc_legend() -> dict:
+    d = _ds_data()
+    counts = d["g"].key.value_counts().to_dict()
+    curves = _MERGE.get("curves", [])
+    order = ["t1_zarrabi", "t1b_zarrabi", "t1_curve"] + \
+        [f"t2_curve:{i}" for i in range(len(curves))] + ["not_routed", "lake", "tidal"]
+    out = []
+    for k in order:
+        out.append({"key": k, "label": _ds_label(k), "color": "#%02x%02x%02x" % _ds_color(k),
+                    "count": int(counts.get(k, 0))})
+    return {"entries": out}
+
+
+def reach_at(lat: float, lon: float, z: int) -> dict | None:
+    """Properties of the visible reach nearest a click (within ~8 px)."""
+    import shapely
+
+    d = _ds_data()
+    tol = 8 * 360.0 / (256 * 2.0 ** z)               # degrees of longitude
+    cl = math.cos(math.radians(lat))
+    pt = shapely.Point(lon, lat)
+    idx = d["tree"].query(shapely.box(lon - tol, lat - tol * cl, lon + tol, lat + tol * cl))
+    idx = idx[d["da"][idx] >= _ds_da_min(z)]
+    if not len(idx):
+        return None
+    geoms = d["g"].geometry.values[idx]
+    # distance in (scaled-lon, lat) degrees: shrink longitudes by cos(lat)
+    sg = shapely.transform(geoms, lambda c: c * [cl, 1.0])
+    dist = shapely.distance(sg, shapely.Point(lon * cl, lat))
+    j = int(np.argmin(dist))
+    if dist[j] > tol * cl:
+        return None
+    r = d["g"].iloc[idx[j]]
+    out = {}
+    for k in ("huc4", "NHDPlusID", "name", "src", "key", "tier", "D", "W", "DA",
+              "TotDASqKm", "da_from_div", "zarrabi_mf_depth", "curve", "physio",
+              "conduit", "max_cut"):
+        v = r[k]
+        if isinstance(v, (np.floating, float)):
+            v = None if not np.isfinite(v) else round(float(v), 3)
+        elif isinstance(v, (np.integer,)):
+            v = int(v)
+        elif isinstance(v, np.bool_):
+            v = bool(v)
+        out[k] = v
+    out["NHDPlusID"] = str(out["NHDPlusID"])      # > 2^53: keep exact in JS
+    out["label"] = _ds_label(r.key)
+    return out
 
 
 @lru_cache(maxsize=4)
@@ -722,6 +895,20 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"error": "run scripts/burn_gauge_compare.py first"}, 404)
                 else:
                     self._send(200, gp.read_bytes(), "application/json")
+            elif path == "/api/depthsrc_legend":
+                if not (_is_burn() and _ds_files()):
+                    self._send_json({"error": "run scripts/burn_region.py sources first"}, 404)
+                else:
+                    self._send_json(depthsrc_legend())
+            elif path == "/api/reach_at":
+                if not (_is_burn() and _ds_files()):
+                    self._send_json({"error": "no depth-source layer"}, 404)
+                else:
+                    hit = reach_at(float(qs["lat"][0]), float(qs["lon"][0]),
+                                   int(qs["z"][0]))
+                    self._send_json(hit or {})
+            elif path.startswith("/api/depthsrc_tile/"):
+                self._handle_depthsrc_tile(path)
             elif path.startswith("/api/burndepth_tile/"):
                 self._handle_burndepth_tile(path)
             elif path.startswith("/api/depth_tile/"):
@@ -802,6 +989,27 @@ class Handler(BaseHTTPRequestHandler):
         key = f"burn_{z}_{x}_{y}_{vrt.stat().st_mtime_ns}"
         png = _cached_png(hashlib.sha1(key.encode()).hexdigest(),
                           lambda: render_burndepth_tile(z, x, y))
+        self._send(200, png, "image/png")
+
+    def _handle_depthsrc_tile(self, path: str):
+        # /api/depthsrc_tile/<z>/<x>/<y>.png
+        parts = path.split("/")
+        if len(parts) != 6 or not parts[5].endswith(".png"):
+            self._send_json({"error": "bad path"}, 404)
+            return
+        try:
+            z, x, y = int(parts[3]), int(parts[4]), int(parts[5][:-4])
+        except ValueError:
+            self._send_json({"error": "bad tile coordinates"}, 400)
+            return
+        files = _ds_files() if _is_burn() else []
+        if not files:
+            self._send_json({"error": "no depth-source layer"}, 404)
+            return
+        sig = "_".join(str(p.stat().st_mtime_ns) for p in files)
+        key = f"dsrc_{z}_{x}_{y}_{sig}"
+        png = _cached_png(hashlib.sha1(key.encode()).hexdigest(),
+                          lambda: render_depthsrc_tile(z, x, y))
         self._send(200, png, "image/png")
 
     def _handle_depth_tile(self, path: str):

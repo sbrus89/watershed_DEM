@@ -5,6 +5,7 @@ Writes a NEW tile set (config project.name, output.root); the merged product
 is only read. Steps (each idempotent; `all` runs them in order):
   prepare   check provenance ids; per-HUC-4 ML attribute table + TIGER crossings
   network   per-HUC-4 channel network pass -> per-tile burn specs (single process)
+  sources   per-reach depth-source table for the viewer (<root>/qa/depth_source/)
   tiles     rasterize + apply every tile (or --tile T) in parallel (--nproc)
   vrt       mosaic VRT + overviews
   qa        grid / seams / burn summary (--connectivity: ponding on the network
@@ -80,10 +81,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=str(dp.path("config", "burn_region02.yaml")))
-    ap.add_argument("step", choices=["prepare", "network", "tiles", "vrt", "qa", "all"])
+    ap.add_argument("step", choices=["prepare", "network", "sources", "tiles", "vrt", "qa", "all"])
     ap.add_argument("--tile", action="append", help="restrict 'tiles' (repeatable)")
-    ap.add_argument("--huc4", help="restrict 'network' to one HUC-4")
-    ap.add_argument("--force", action="store_true", help="rerun 'network' even if up to date")
+    ap.add_argument("--huc4", help="restrict 'network' / 'sources' to one HUC-4")
+    ap.add_argument("--force", action="store_true", help="rerun 'network' / 'sources' even if up to date")
     ap.add_argument("--nproc", type=int, default=2,
                     help="parallel tiles (~2 GB each; login-node cap is 30 GB)")
     ap.add_argument("--connectivity", action="store_true",
@@ -96,6 +97,8 @@ def main():
         burn.prepare(b)
     if args.step in ("network", "all"):
         burn.run_network(b, args.huc4, args.force)
+    if args.step in ("sources", "all"):
+        burn.depth_sources(b, args.huc4, args.force)
     if args.step in ("tiles", "all"):
         run_tiles(args.config, args.tile, args.nproc)
     if args.step in ("vrt", "all"):

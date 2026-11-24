@@ -37,7 +37,13 @@
   }
 
   function onEachFeature(feature, layer) {
-    layer.on("click", () => selectTile(layer, feature.properties));
+    layer.on("click", (e) => {
+      // with the channel layer on, a click on a channel shows that reach
+      // instead of opening the tile panel
+      if (e.originalEvent) e.originalEvent._tileClick = true;
+      if (!dsrcActive()) { selectTile(layer, feature.properties); return; }
+      queryReach(e.latlng).then((hit) => { if (!hit) selectTile(layer, feature.properties); });
+    });
   }
 
   function selectTile(layer, props) {
@@ -184,6 +190,7 @@
       document.getElementById("burnControls").hidden = false;
       document.getElementById("burnTab").hidden = false;
       document.getElementById("gaugeControls").hidden = false;
+      document.getElementById("dsrcControls").hidden = false;
     }
     const legendEl = document.getElementById("legend");
     legendEl.innerHTML = Object.entries(meta.legend).map(([name, info]) => `
@@ -425,6 +432,95 @@
       gaugeToggle.checked = false;
       window.alert("Gauge layer not available -- run scripts/burn_gauge_compare.py first.");
     });
+  });
+
+  // ---- channel depth-source layer (burned product only) -------------------
+  //
+  // Every burn-network reach coloured by where its mean depth D came from
+  // (<root>/qa/depth_source/<huc4>.gpkg, scripts/burn_region.py sources),
+  // drawn server-side as XYZ tiles; small streams appear as you zoom in.
+  // Clicking near a channel asks /api/reach_at for that reach.
+
+  const dsrcToggle = document.getElementById("dsrcToggle");
+  const dsrcOpacityRow = document.getElementById("dsrcOpacityRow");
+  const dsrcOpacitySlider = document.getElementById("dsrcOpacitySlider");
+  const dsrcOpacityLabel = document.getElementById("dsrcOpacityLabel");
+  const dsrcLegendEl = document.getElementById("dsrcLegend");
+  let dsrcLayer = null;
+  let dsrcLegendPromise = null;
+
+  function dsrcActive() { return !!(dsrcLayer && map.hasLayer(dsrcLayer)); }
+
+  function reachPopup(p) {
+    const rows = [
+      ["depth source", escapeHtml(p.label || p.src)],
+      ["burn mean depth D", fmt(p.D, 2, " m") + (p.tier ? ` (tier ${escapeHtml(p.tier)})` : "")],
+      ["burn width", p.W === null ? (p.tier === "1" ? "river polygon" : "&ndash;") : fmt(p.W, 1, " m")],
+      ["drainage area", fmt(p.DA, 1, " km&sup2;") +
+        (p.da_from_div ? ` (DivDASqKm; TotDASqKm ${fmt(p.TotDASqKm, 0)})` : "")],
+      ["Zarrabi mean-flow depth (raw)", fmt(p.zarrabi_mf_depth, 2, " m")],
+      ["regional curve", escapeHtml(p.curve || "")],
+      ["physiographic section", escapeHtml(p.physio || "")],
+      ["deepest cut on path", fmt(p.max_cut, 2, " m")],
+      ["culvert / conduit", p.conduit ? "yes" : "no"],
+    ];
+    return `<b>${escapeHtml(p.name || "(unnamed)")}</b><br>NHDPlus HR ${escapeHtml(p.NHDPlusID)} &middot; HUC ${escapeHtml(p.huc4)}` +
+      `<table class="gaugePopup">${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>`;
+  }
+
+  function queryReach(latlng) {
+    const q = `lat=${latlng.lat}&lon=${latlng.lng}&z=${Math.round(map.getZoom())}`;
+    return fetch(`/api/reach_at?${q}`).then((r) => r.ok ? r.json() : {}).then((p) => {
+      if (!p || !p.src) return false;
+      L.popup({ maxWidth: 380 }).setLatLng(latlng).setContent(reachPopup(p)).openOn(map);
+      return true;
+    }).catch(() => false);
+  }
+
+  map.on("click", (e) => {
+    if (e.originalEvent && e.originalEvent._tileClick) return;  // tile handler did it
+    if (dsrcActive()) queryReach(e.latlng);
+  });
+
+  dsrcToggle.addEventListener("change", () => {
+    dsrcOpacityRow.hidden = !dsrcToggle.checked;
+    if (!dsrcToggle.checked) {
+      if (dsrcLayer) map.removeLayer(dsrcLayer);
+      dsrcLegendEl.hidden = true;
+      return;
+    }
+    if (!dsrcLegendPromise) {
+      dsrcLegendPromise = fetch("/api/depthsrc_legend").then((r) => {
+        if (!r.ok) throw new Error("no depth-source layer");
+        return r.json();
+      }).then((info) => {
+        dsrcLegendEl.innerHTML = info.entries.filter((e) => e.count > 0).map((e) => `
+          <div class="swatchRow">
+            <span class="swatch line" style="background:${e.color}"></span>
+            <span>${escapeHtml(e.label)} <span class="count">${e.count.toLocaleString()}</span></span>
+          </div>`).join("") +
+          `<div class="legendCaption">reaches; streams &lt; 300 km&sup2; appear as you zoom in. Click a channel for details.</div>`;
+      });
+    }
+    dsrcLegendPromise.then(() => {
+      dsrcLegendEl.hidden = false;
+      if (!dsrcLayer) {
+        dsrcLayer = L.tileLayer("/api/depthsrc_tile/{z}/{x}/{y}.png", {
+          opacity: dsrcOpacitySlider.value / 100, maxZoom: 18, maxNativeZoom: 17,
+        });
+      }
+      dsrcLayer.addTo(map);
+    }).catch(() => {
+      dsrcLegendPromise = null;
+      dsrcToggle.checked = false;
+      dsrcOpacityRow.hidden = true;
+      window.alert("Depth-source layer not available -- run scripts/burn_region.py sources first.");
+    });
+  });
+
+  dsrcOpacitySlider.addEventListener("input", () => {
+    dsrcOpacityLabel.textContent = `${dsrcOpacitySlider.value}%`;
+    if (dsrcLayer) dsrcLayer.setOpacity(dsrcOpacitySlider.value / 100);
   });
 
   // ---- basin boundary -----------------------------------------------------
